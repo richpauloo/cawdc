@@ -1,0 +1,344 @@
+---
+title: "EDA and Statistical Tests"
+subtitle : "2012-2016 drought (block-level) and Future (tract-level) Simulated Droughts"
+author: Rich Pauloo & Amanda Fencl
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: cosmo
+    highlight: tango
+    fig_height: 8
+    fig_width: 8
+---
+
+# **INTRODUCTION** 
+
+The purpose of this script is to:  
+
+* Postprocess the 2012-2016 drought, and 1-4 year drought scenarios  
+
+* Plot global and county level distributions of minimum distances from failed wells to their nearest water system  
+
+* 2012-2016 drought: **block-level Census data** and **the most accurate well location**   
+
+* 1-4 year future drought simulations well locations are drawn from OSWCR database, with an accuracy of townships centroid (~0.7 miles), so we use **tract-level** Census data  
+
+* Census data used DWR's [Disadvantaged Communities (DAC) Census Tract layer]("https://data.cnra.ca.gov/dataset/census-tract-disadvantaged-communities-2016"), which uses the American Community Survey (ACS) 2012-2016 5-year estimates for median household income to assign tracts as DAC or not.  
+
+* California MHI in 2016 was $63,783. Our income level categories are scaled accordingly as:  
+    + **MHI+** : at or above MHI  
+    + **DAC** : 80% of MHI  
+    + **SDAC** : 60% of MHI 
+    
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, error = FALSE)
+```
+
+***  
+
+# **EXPLORATORY DATA ANALYSIS**
+
+## Distribution of Distance to Closest Water System per Income Group 
+```{r}
+# packages used
+library(readr)
+library(tidyverse)
+library(raster)
+library(sp)
+library(here)
+```
+
+Read data.
+```{r}
+# vector of shapefiles to bring into R
+f <- list.files(here("data","amanda_shp","well_failures_block_exact"))
+f <- f[grepl(".shp$", f)] # patterns that end in .shp
+
+l <- vector("list", length(f)) # initalize list
+for(i in 1:5){
+  l[[i]] <- shapefile(here("data",
+                           "amanda_shp",
+                           "well_failures_block_exact",
+                           f[i]))
+}
+
+# tables of MHI per drought scenario
+# lapply(l, function(x){table(x@data$MHI16CAT)})
+
+# make MHI into factor
+l <- lapply(l, 
+            function(x){
+              x@data$MHI16CAT <- as.factor(x@data$MHI16CAT); 
+              #levels(x@data$MHI16CAT) <- c("SDAC","DAC", "MHI+")
+              return(x)
+              }
+            )
+```
+
+### 2012-2016 Drought
+
+The 2012-2016 drought affected low-income more than high-income areas, yet more than half of the well failures in severely disadvantaged areas were less than 1 mile from a water system.  
+
+On a county-level, some counties like Kern, Fresno and Tehema show a SDAC communities with particularly high median distances between well failures and their closest water system.  
+```{r}
+# coutny level response
+p1 <- l[[1]]@data %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), y = DIST_MI,
+                   fill = MHI16CAT), alpha = 0.5) +
+  facet_wrap(~COUNTY) +
+  coord_flip() +
+  theme_bw() +
+  labs(title = "Distance from Domestic Well Failures to Closest Water System",
+       subtitle = "2012-2016 drought: County-Level Response",
+       y = "Distance (miles)", x = "Income Level") +
+  scale_fill_viridis_d() +
+  guides(fill = FALSE)
+
+#central valley wide response
+p1b <- l[[1]]@data %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), y = DIST_MI,
+                   fill = MHI16CAT), alpha = 0.5) +
+  coord_flip(ylim = c(0,7.5)) +
+  scale_y_continuous(breaks = c(0,5,10)) +
+  theme_bw() +
+  labs(title = "Distance from Domestic Well Failures to Closest Water System",
+       subtitle = "2012-2016 drought: Central Valley-Level Response",
+       y = "Distance (miles)", x = "Income Level") +
+  scale_fill_viridis_d() +
+  guides(fill = FALSE)
+
+p1b
+p1
+```
+
+### Simulated 1-4 year Future Droughts
+
+Below is code for the county level plot, which is crazy big, so it's not included here.
+```{r}
+# extract and combine d1-d4 data
+ll <- l[2:5]
+drought <- paste(1:4, "yr")
+for(i in 1:4){ll[[i]]$drought <- drought[i]}
+l2 <- lapply(ll[1:4], 
+             function(x){
+               y <- x@data
+               y <- y %>% dplyr::select(MHI16CAT, drought, DIST_MI,CountyName)
+               return(y)})
+d14 <- do.call(rbind.data.frame, l2)
+
+# county level plots
+p2 <- vector("list", 4) # initalize list
+for(i in 1:4){
+  p2[[i]] <- l2[[i]] %>%
+    filter(!is.na(MHI16CAT)) %>%
+    ggplot() +
+    geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), y = DIST_MI,
+                     fill = MHI16CAT), alpha = 0.5) +
+    facet_wrap(~CountyName) +
+    theme_minimal() +
+    labs(title = "Distance from Domestic Well Failures to Closest Water System",
+         subtitle = paste0("Simulated ", drought[i], " drought: County-Level Response"),
+         y = "Distance (miles)", x = "Income Level") +
+    coord_flip(ylim = c(0,10)) +
+    scale_y_continuous(breaks = c(0,5,10)) +
+    scale_fill_viridis_d() +
+    guides(fill = FALSE)
+}
+
+# CV level plot
+p3 <- d14 %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), 
+                   y = DIST_MI, fill = MHI16CAT), alpha = 0.5) +
+  facet_wrap(~drought, ncol = 1, strip.position = "right") +
+  theme_bw() +
+  labs(title = "Distance from Well Failures to Closest Water System",
+       subtitle = "Simulated 1, 2, 3 and 4 year droughts: Central Valley Wide Response",
+       y = "Distance (miles)", x = "Income Level") +
+  coord_flip(ylim = c(0,9.8)) +
+  scale_y_continuous(breaks = c(0,5,10)) +
+  scale_fill_viridis_d() +
+  guides(fill = FALSE)
+
+
+# visualize
+p3
+p2[[1]];p2[[2]];p2[[3]];p2[[4]]
+```
+
+***  
+
+## Spatial Distributions of Income Level 
+
+Now we explore the spatial distribution of well failures in terms of income groups. Frist we load some data, including the Central Valley shapefile and a Google terrain basemap.
+```{r}
+# lat/lon projection
+ll <- crs("+proj=longlat +datum=WGS84 +no_defs")
+
+# read central valley alluvial basin boundary and transform to ll
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary",
+                     "Alluvial_Bnd.shp"))
+cv <- spTransform(cv, ll)
+
+library(ggmap) # doesn't plot with SF so need to convert
+location <- c(median(coordinates(cv)[,1]),
+              median(coordinates(cv)[,2]))
+smap <- get_map(location=bbox(cv),
+                color="color",
+                maptype="satellite",
+                source="google", zoom = 6)
+
+sat_bg <- ggmap(smap) # satellite background
+
+# tidy cv 
+cvt <- broom::tidy(cv) 
+```
+
+### 2012-2016 Drought
+```{r, out.width = '100%'}
+l[[1]]@data$drought <- paste0("2012-2016 (n = ", formatC(nrow(l[[1]]),big.mark = ","), ")")
+
+l1t <- broom::tidy(l[[1]])
+pse <- sat_bg + 
+    geom_polygon(data = cvt, 
+                 aes(long, lat, group = group), 
+                 color = "black", fill = "white", alpha = 0.5) +
+    geom_point(data = l1t, 
+               aes(coords.x1, coords.x2, color = MHI16CAT), 
+               alpha = 0.4, size = 1) +
+    coord_fixed(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+    theme_bw() +
+    scale_color_viridis_d("Income Level", breaks = c("MHI+","DAC","SDAC"),
+                       labels = c("MHI+","DAC","SDAC")) +
+    labs(title = "Spatial Distibution of Income Level",
+         subtitle = "2012-2016 Drought") +
+    guides(colour = guide_legend(override.aes = list(size=3)))
+
+pse
+```
+
+### Simulated 1-4 year Future Droughts
+```{r, out.width = '100%'}
+# tidy points
+dt <- vector("list", 4) # empty list
+dsp <- l[2:5] # spatial data list
+title <- c("1 yr", "2 yr", "3 yr", "4 yr") # group titles
+n <- sapply(l2, nrow) # wells dry per drought
+n <- formatC(n, big.mark = ",")
+
+for(i in 1:4){
+  dt[[i]] <- broom::tidy(dsp[[i]])
+  dt[[i]]$drought <- paste0(title[i], " (n = ", n[i], ")")
+  dt[[i]] <- dt[[i]] %>% dplyr::select(coords.x1, coords.x2,
+                                       MHI16CAT, drought, DIST_MI)
+}
+
+dtb <- do.call(rbind.data.frame, dt) # bind into one df
+dtb <- dtb %>% filter(!is.na(MHI16CAT))
+
+pse2 <- sat_bg + 
+    geom_polygon(data = cvt, 
+                 aes(long, lat, group = group), 
+                 color = "black", fill = "white", alpha = 0.5) +
+    geom_point(data = dtb, 
+               aes(coords.x1, coords.x2, color = MHI16CAT), 
+               alpha = 0.4, size = 1) +
+    facet_wrap(~ drought, strip.position="bottom", nrow=2, ncol=2) +
+    coord_fixed(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+    theme_void() +
+    scale_color_viridis_d() +
+    labs(title = "Spatial Distibution of Income Level",
+         subtitle = "Simulated 1-4 Year Future Droughts") +
+    guides(colour = guide_legend(override.aes = list(size=3))) 
+
+pse2
+```
+
+
+***  
+
+# **STATISTICS** 
+
+## ANOVA
+
+Is the mean distance from well failure to closest water system different per income level group (SDAC, DAC, and MHI+) during the 2012-2016 drought?  
+
+$H_0 : \mu_{SDAC} = \mu_{DAC} = \mu_{MHI+}$  
+
+$H_1 : at \space least \space one \space mean \space isn't \space = to \space others$  
+
+Run the ANOVA.
+```{r}
+res_aov <- aov(DIST_MI ~ MHI16CAT, data = l[[1]]@data)
+summary(res_aov)
+```
+
+## Tukey Multiple pariwise comparisons
+```{r}
+TukeyHSD(res_aov)
+```
+
+
+The ANOVA suggests that we accept $H_1$, and Tukey's multiple pairwise comparisons suggests that there is a significant difference between all groups, except between MHI+ and DAC. However, beforre accepting these results, we need to check if the assumptions of the ANOVA are met.
+
+## Check assumptions of ANOVA
+
+The ANOVA test assumes that:  
+
+* the data are normally distributed  
+* the variance across groups are homogeneous  
+
+We check that with diagnostic plots.  
+
+### Check the homogeneity of variance assumption
+
+The fit versus residuals plot is used to assess the homogeneity of variances.  
+
+There is no evident relationship between fitted values and residuals (the mean of each group). Therefore, we assume homogeneity of variances.
+
+```{r}
+# 1. Homogeneity of variances
+plot(res_aov, 1)
+```
+
+Bartlett's test and Levene's test can also be used to check the homogeneity of variances.  
+
+Levene's test is less sensitive to departures from normal distribution, so it us selected for use here. 
+```{r}
+library(car)
+leveneTest(DIST_MI ~ MHI16CAT, data = l[[1]]@data)
+```
+The p-value is less than the significance level of 0.05, meaning there is evidence to suggest that the variance across groups is statistically significantly different. Therefore, we cannot assume the homogeneity of variances in the different income level groups.
+
+### Relaxing the homogeneity of variance assumption
+
+The classical one-way ANOVA test requires an assumption of equal variances for all groups. However, in our data, Levene's test was significant, indicating that the homogeneity of variance assumption was not met.  
+
+An alternative procedure that does not require that assumption is the Welch one-way test, but as an added measure, a multiple pairwise t-test with no assumption of equal variances, and no pooling of the SDs is used. 
+
+In this case, we find the same results as in the ANOVA: **there is a significant difference  between all groups, except between MHI+ and DAC.** This is pretty obvious from the plots, and confirmed by these tests.
+
+```{r}
+# ANOVA test with no assumption of equal variances
+oneway.test(DIST_MI ~ MHI16CAT, data = l[[1]]@data)
+
+# Pairwise t-tests with no assumption of equal variances
+pairwise.t.test(l[[1]]@data$DIST_MI, l[[1]]@data$MHI16CAT,
+                 p.adjust.method = "BH", pool.sd = FALSE)
+```
+
+Note that, a non-parametric alternative to one-way ANOVA is Kruskal-Wallis rank sum test, which can be used when ANNOVA assumptions are not met. Again, we see that there is a significant difference between groups.
+```{r}
+kruskal.test(DIST_MI ~ MHI16CAT, data = l[[1]]@data)
+```
+
+In the interst of time, these analyses were not repeated for simulated 1-4 year long future droughts, nor at the county-level for the 2012-2016 drought, or the simulated future droughts.  
+

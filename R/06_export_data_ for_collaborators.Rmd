@@ -1,0 +1,88 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+Before running this script, run `06_calibration_herve.Rmd`.  
+
+The sole purpose of this script it to export data for:  
+
+* Leo : GEOJSON shapefiles to build the interactive visualization.  
+* Herve : Machine learning  
+* Amanda : social/demographic analysis  
+* Alvar: economic analysis  
+
+
+***  
+
+
+Cleaning and organizing some data.
+```{r}
+# polygons: select/create relevant columns for visualization
+# and give columns more intuitive names
+b118cvsf_export <- b118cvsf %>% 
+  select(Subbasin_N, frp, dry, wet, geometry) %>% 
+  mutate(total_count = dry + wet,
+         frp = round(frp, 2)) %>% 
+  rename(name = Subbasin_N, fail_perc = frp, 
+         dry_count = dry, wet_count = wet)
+
+blmcvsf_export <- blmcvsf %>% 
+  select(TWNSHPLAB, frp, dry, wet, geometry) %>% 
+  mutate(total_count = dry + wet,
+         frp = round(frp, 2)) %>% 
+  rename(name = TWNSHPLAB, fail_perc = frp, 
+         dry_count = dry, wet_count = wet)
+
+gsacvsf_export <- gsacvsf %>% 
+  select(GSA.Name, frp, dry, wet, geometry) %>% 
+  mutate(total_count = dry + wet,
+         frp = round(frp, 2)) %>% 
+  rename(name = GSA.Name, fail_perc = frp, 
+         dry_count = dry, wet_count = wet)
+
+# same for points: first convert to sf object
+domcv5llsf <- st_as_sf(domcv5ll) %>% st_transform(crs = "+init=epsg:4326")
+
+domcv5llsf_export <- domcv5llsf %>% 
+  select(WCRNumber, bot, dry, geometry) %>% 
+  rename(Name = WCRNumber, bottom = bot)
+```
+
+Write `.geojson` files for Leo's Mapbox project. 
+```{r}
+library(geojsonio) # for writing geojson files
+
+geojson_write(b118cvsf_export, geometry = "polygon", group = "name", file = "b118_poly.geojson")
+geojson_write(blmcvsf_export, geometry = "polygon", group = "name", file = "blm_poly.geojson")
+geojson_write(gsacvsf_export, geometry = "polygon", group = "name", file = "gsa_poly.geojson")
+geojson_write(domcv5llsf_export, geometry = "point", group = "name", file = "well_pt.geojson")
+```
+
+Write `.shp` files for Amanda's social analysis.  
+```{r}
+st_write(b118cvsf_export, here("data","amanda_social","b118.shp"))
+st_write(blmcvsf_export, here("data","amanda_social","blm.shp"))
+st_write(gsacvsf_export, here("data","amanda_social","gsa.shp"))
+st_write(domcv5llsf_export %>% select(-bottom), 
+         here("data","amanda_social","wells.shp"))
+```
+
+
+Now run `08_make_machine_learning.Rmd` to create data for the machine learning export.  
+
+Write `.shp` files for Herve's machine learning.  
+
+Herve still needs to add:  
+
+* PRISM data  
+```{r}
+
+```
+
+
+
+
+
+
+

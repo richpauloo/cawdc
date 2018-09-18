@@ -1,0 +1,458 @@
+---
+title: "Density Calculations"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    toc_depth: 2
+    code_folding: hide
+    highlight: "pygments"
+date: 2018-08-09
+author: Rich Pauloo
+---
+
+With the output from `06_calibration_herve_alvar_graham_calib_TS.Rmd`, I now make density plots of observed and predicted well failures and compare.  
+
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message    = FALSE,
+  error      = FALSE,
+  warning    = FALSE,
+  cache      = TRUE
+)
+```
+
+# Data Setup
+
+Packages used.
+```{r}
+library(here)      # for system agnostic file paths
+library(GISTools)  # counting points in polygons with poly.counts()
+library(raster)    # for raster objects
+library(tidyverse) # general purpose data science toolkit
+library(sp)        # spatial objects
+```
+
+# Data
+```{r}
+# mercator projection
+merc <- crs("+proj=merc +lon_0=0 +k=1 +x_0=0 +y_0=0 
+            +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+# read central valley alluvial basin boundary and transform to mercator
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary",
+                     "Alluvial_Bnd.shp"))
+cv <- spTransform(cv, merc)
+
+# observed dry wells
+dw <- shapefile(here("data", "dry_wells", "cleaned_dw", "dwcv.shp"))
+dw <- spTransform(dw, merc)
+
+# predicted dry wells
+pdw <- read_rds(here("code","domcv5ll_dry.rds"))
+pdw <- spTransform(pdw, merc)
+pdw_1 <- read_rds(here("code","domcv5ll_dry_1.rds"))
+pdw_1 <- spTransform(pdw_1, merc)
+
+# wells dry at t0
+dry_t0 <- read_rds("dry_at_t0.rds")
+dry_t0 <- spTransform(dry_t0, merc)
+nrow(dry_t0)
+```
+
+Compare obsered and predicted dry wells.
+```{r}
+plot(cv)
+plot(dw, pch = 19, cex = 0.01, col = "blue", add=T)
+plot(pdw, pch = 19, cex = 0.01, col = "red", add=T)
+```
+
+Make pretty
+```{r}
+library(sf)
+dwsf <-  st_as_sf(dw)
+pdw$geometry <- NULL
+pdwsf <- st_as_sf(pdw)
+cvsf <- st_as_sf(cv)
+
+p1 <- ggplot() +
+  geom_sf(data = cvsf) +
+  geom_sf(data = dwsf, alpha = 0.4, size = 0.75, color = "red") +
+  labs(title = "Observed Dry Wells",
+       subtitle = "2012-2016 (n = 2,031)") +
+  theme_minimal()
+
+p2 <- ggplot() +
+  geom_sf(data = cvsf) +
+  geom_sf(data = pdwsf, alpha = 0.4, size = 0.75, color = "blue") +
+  labs(title = "Predicted Dry Wells",
+       subtitle = "2012-2016 (n = 2,059)") +
+  theme_minimal()
+
+#p3 <- cowplot::plot_grid(p1, p2, align = "h")
+#ggplot2::ggsave(p3, filename = "pred_obs.png", dpi = 300, height = 7, width = 11)
+```
+
+```{r}
+plot(cv)
+plot(dry_t0, pch = 19, cex = 0.01, col = "green", add=T)
+```
+
+
+```{r}
+plot(cv)
+plot(dw, pch = 19, cex = 0.01, col = "blue", add=T)
+plot(pdw_1, pch = 19, cex = 0.01, col = "red", add=T)
+```
+
+# Point Pattern Analysis: Kernel Density
+
+```{r}
+library(spatstat) # for kernel density
+library(maptools) # to create owin objects
+
+# make a `ppp` object: points and window of study region
+
+# window: object class "owin"
+cv_owin <- maptools::as.owin.SpatialPolygons(cv)
+
+# points 
+dw_pts  <- coordinates(dw)
+pdw_pts <- coordinates(pdw_1)
+#dry_t0_pts <- coordinates(dry_t0)
+
+# create ppp objects
+dw_ppp  <- ppp(dw_pts[, 1],  dw_pts[, 2],  window = cv_owin)
+pdw_ppp <- ppp(pdw_pts[, 1], pdw_pts[, 2], window = cv_owin)
+#dry_t0_ppp <- ppp(dry_t0_pts[, 1], dry_t0_pts[, 2], window = cv_owin)
+```
+
+```{r}
+# compute densities: first 
+lambda <- nrow(dw) / gArea(cv)
+bw <- 0.15/sqrt(5*lambda) # bandwidth -> same as bw.stoyan(dw_ppp)
+
+# calculate gaussian kernel density
+dw_dens_1  <- density(pdw_ppp,
+                      sigma = bw, adjust = 2)
+
+# visualize
+plot(log(dw_dens_1), main = "Observed : Gaussian kernel density")
+contour(log(dw_dens_1), add=TRUE)
+
+# function to calculate bandwidth
+calc_bandwidth <- function(p, a){
+  lambda <- nrow(p)/gArea(a) # p: spatial points; a: polygon. in sq km
+  bw <- 0.15/sqrt(5*lambda)
+  return(bw)
+}
+```
+
+Experiments in scaling
+```{r}
+library(BBmisc) # for scaling matrices
+
+# scale to avoid negative numbers 
+dw_dens_1$v[dw_dens_1$v <= 0] <- 0
+
+dw_dens_1$v <- normalize(dw_dens_1$v, 
+                          method = "range", 
+                          range = c(10,10e8), 
+                          on.constant = "quiet")
+
+plot(log(dw_dens_1))
+plot(dw_dens_1)
+
+dw_dens_2 <- dw_dens_3 <- dw_dens_1
+
+dw_dens_2$v <- normalize(dw_dens_1$v, 
+                          method = "range", 
+                          range = c(0,1), 
+                          on.constant = "quiet")
+dw_dens_3$v <- normalize(log(dw_dens_1$v), 
+                          method = "range", 
+                          range = c(0,1), 
+                          on.constant = "quiet")
+plot(dw_dens_2)
+plot(dw_dens_3)
+temp <- (dw_dens_2 + dw_dens_3) / 2
+plot(temp)
+```
+
+
+After selecting the proper bandwidth, we see that the intensity of the point process varies on a log scale. We log-transform the kernel density estimates, and normalize negative values from 0-1 and generate probability maps for the observed and predicted point patterns.
+```{r}
+# max value in the non-log transformed density estimation
+dw_dens_2   <- dw_dens_1
+dw_dens_2$v <- log(dw_dens_2$v)
+dw_dens_2$v <- normalize(dw_dens_2$v, 
+                         method = "range", 
+                         range = c(0, 1), 
+                         on.constant = "quiet")
+
+dw_dens_2 %>% hist() # ensure data scales
+
+dw_dens_2$v[is.nan(dw_dens_2$v)] <- 0 # -Inf -> 0
+
+plot(cv)
+plot(dw_dens_2, main = "Observed - Gaussian kernel density",add=T)
+
+# function to scale data
+calc_scaled_density <- function(d){
+  d$v[d$v <= 0] <- 0
+  
+  d$v <- normalize(d$v, 
+                   method = "range", 
+                   range = c(10,10e8), 
+                   on.constant = "quiet")
+  
+  d_2 <- d_3 <- d
+  
+  d_2$v <- normalize(d$v, 
+                     method = "range", 
+                     range = c(0,1), 
+                     on.constant = "quiet")
+  d_3$v <- normalize(log(d$v), 
+                     method = "range", 
+                     range = c(0,1), 
+                     on.constant = "quiet")
+  f <- (d_2 + d_3) / 2
+  return(f)
+}
+```
+
+Apply functions for bandwidth and log normalized probability to observed and predicted dry well kernel densities of point process intensity.
+```{r}
+# compute bandwidth for observed and predicted point patterns
+obw <- calc_bandwidth(dw, cv)
+pbw <- calc_bandwidth(pdw, cv)  
+
+# calculate density
+od <- density(dw_ppp,  sigma = obw, adjust = 2)  
+pd <- density(pdw_ppp, sigma = pbw, adjust = 2)
+
+# scaling values to between 0-1
+ods <- calc_scaled_density(od)
+pds <- calc_scaled_density(pd)
+```
+
+```{r}
+# observed kernel density
+plot(ods)
+plot(cv, add=T)
+
+# predicted kernel density
+plot(pds)
+plot(cv, add=T)
+
+# difference
+plot(pds - ods)
+plot(cv, add=T)
+```
+
+
+```{r}
+# histogram of difference
+data.frame(x = (pds-ods)$v %>% as.vector()) %>% 
+  ggplot() +
+  geom_density(aes(x)) + 
+  geom_vline(aes(xintercept = 0.65)) + 
+  geom_vline(aes(xintercept = -0.65))
+```
+
+The histogram of differences between kernel density estimations looks good, but the kernel density plots themselves, when compared to the maps of point patterns, look off.  
+
+- review kernel density estimation and different bandwidths  
+- plot_grid: p1 = observed point pattern, p2 = density of obs pp, p3 = predicted pp, p4 = density of prediction.
+
+
+
+# Rasterize and calculate stats
+
+```{r}
+s <- 9656.064 # six miles in meters
+
+dwr  <- raster(ods)
+crs(dwr) <- crs(dw)
+xs <- s/ res(dwr)[1] # x scaling
+ys <- s/ res(dwr)[2] # y scaling
+dwr <- aggregate(dwr, c(xs, ys))
+#dwr@data@values <- dwr@data@values *1000000 * sqrt(100)*2 # m2 -> km2 -> 100km2
+spplot(dwr)
+
+pdwr <- raster(pds)
+crs(pdwr) <- crs(dw)
+xs <- s/ res(pdwr)[1] # x scaling
+ys <- s/ res(pdwr)[2] # y scaling
+pdwr <- aggregate(pdwr, c(xs, ys))
+#pdwr@data@values <- pdwr@data@values *1000000 * sqrt(100)*2 # m2 -> km2 -> 100km2
+spplot(pdwr)
+
+# difference between predicted and observed failure density
+abs_diff <- abs(pdwr - dwr)
+rel_diff <- pdwr - dwr
+```
+
+Compare predicted and observed. 
+```{r}
+# amke into data frames
+dwr_df  <- as.data.frame(dwr, xy = TRUE)
+pdwr_df <- as.data.frame(pdwr, xy = TRUE)
+
+# cv in points for ggplot
+cv@data$id = rownames(cv@data)
+cv_pts = fortify(cv, region="id")
+cv_df = left_join(cv_pts, cv@data, by="id")
+
+# palettes, labels
+lab  <- c("0.00 to 0.20","0.20 to 0.40","0.40 to 0.60","0.60 to 0.80", "0.80 to 1.00")
+
+dwr_df$bin  <- base::cut(dwr_df$layer,  breaks = seq(0, 1, 0.2), labels = lab)
+pdwr_df$bin <- base::cut(pdwr_df$layer, breaks = seq(0, 1, 0.2), labels = lab)
+
+pal  <- colormap(colormaps$jet, nshades = 10, alpha = .7)[6:10]
+pal[1] <- "#ffffff"
+
+# observed
+p_obs_map <- dwr_df %>% 
+  ggplot() +
+  geom_raster(aes(x,y, fill = bin)) + 
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "Probability",
+       title = "Observed Log Weighted Kernel Density Estimate",
+       subtitle = "Spring 2012 - Fall 2016") +
+  scale_fill_manual(values = pal,
+                    breaks = rev(lab),
+                    labels = rev(lab))
+  
+# predicted
+p_pred_map <- pdwr_df %>% 
+  ggplot() +
+  geom_raster(aes(x,y, fill = bin)) + 
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "Probability",
+       title = "Predicted Log Weighted Kernel Density Estimate",
+       subtitle = "Spring 2012 - Fall 2016") +
+  scale_fill_manual(values = pal,
+                    breaks = rev(lab),
+                    labels = rev(lab))
+
+# histograms
+p_obs_pred_dens <- rbind.data.frame(dwr_df %>% mutate(type = "Observed"), 
+                 pdwr_df %>% mutate(type = "Predicted")) %>% 
+  ggplot() +
+  geom_density(aes(x= layer, fill = type), alpha = 0.3) +
+  theme_minimal() +
+  labs(#title = "Observed and Predicted Kernel Density Estimates",
+       #subtitle = "Spring 2012 - Fall 2016",
+       x = "Kernel Density Estimate", y = "Density",
+       fill = "") +
+  theme(legend.position = "bottom")
+
+top <- cowplot::plot_grid(p_obs_map, p_pred_map)
+p_kernel_grid <- cowplot::plot_grid(top, p_obs_pred_dens, align = "v", axis = "l", ncol = 1)
+#ggsave(p_kernel_grid, filename = "p_kernel_grid.png", height = 7, width = 11, dpi = 300)
+```
+
+Compare difference of rasters.
+```{r}
+library(colormap)
+diff_df <- as.data.frame(abs_diff, xy = TRUE) 
+rel_df <- as.data.frame(rel_diff, xy = TRUE) 
+
+lab  <- c("0.00 to 0.20","0.20 to 0.40","0.40 to 0.60","0.60 to 0.80", "0.80 to 1.00")
+lab2 <- c("-0.80 to -1.00","-0.60 to -0.80","-0.40 to -0.60","-0.20 to -0.40", "0.00 to -0.20",
+          "0.00 to 0.20","0.20 to 0.40","0.40 to 0.60","0.60 to 0.80", "0.80 to 1.00")
+
+diff_df$bin  <- base::cut(diff_df$layer, breaks = seq(0, 1, 0.2), labels = lab)
+rel_df$bin2 <- base::cut(rel_df$layer, breaks = seq(-1, 1, 0.2), labels = lab2)
+
+pal  <- colormap(colormaps$jet, nshades =10, alpha = .7)[6:10]
+pal[1] <- "#ffffff"
+pal2 <- rev(colormap(colormaps$jet, nshades =10, alpha = .7))
+pal2[c(5,6)] <- "#ffffff"
+
+# absolute differene map comparing predicted and observed kernel density estimates
+p_abs_map <- diff_df %>% 
+  ggplot(aes(x,y)) +
+  geom_raster(aes(x,y, fill = bin)) +
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "|difference|",
+       title = "|Predicted - Observed| Kernel Density Estimates",
+       subtitle = "Spring 2012 - Fall 2016") +
+  scale_fill_manual(values = pal,
+                    breaks = rev(lab),
+                    labels = rev(lab))
+
+p_rel_map <- rel_df %>% 
+  ggplot(aes(x,y)) +
+  geom_raster(aes(x,y, fill = bin2)) +
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "difference",
+       title = "Predicted - Observed Kernel Density Estimates",
+       subtitle = "Spring 2012 - Fall 2016") +
+  scale_fill_manual(values = pal2,
+                    breaks = lab2,
+                    labels = rev(lab2))
+
+
+# density plot of absolute difference between predicted and observed
+p_abs_dens <- diff_df %>% 
+  ggplot(aes(layer)) +
+  geom_density(fill = '#619CFF', alpha=0.6) + 
+  theme_minimal() +
+  labs(title = '|Predicted - Observed| Kernel Density Estimates',
+       subtitle = "Spring 2012 - Fall 2016", 
+       x = "|Difference|", y = "Density")
+
+
+# https://stackoverflow.com/questions/4542438/adding-summary-information-to-a-density-plot-created-with-ggplot
+q15.9 <- quantile(rel_df$layer, .159, na.rm=T) # 1 Std 68.2%
+q84.1 <- quantile(rel_df$layer, .841, na.rm=T)
+q2.3  <- quantile(rel_df$layer, .023, na.rm=T) # 2 Std 95.4%
+q97.7 <- quantile(rel_df$layer, .977, na.rm=T)
+q0.01 <- quantile(rel_df$layer, .001, na.rm=T) # 3 Std 99.8%
+q99.9 <- quantile(rel_df$layer, .999, na.rm=T)
+meanx <- mean(rel_df$layer, na.rm = T)
+medx  <- median(rel_df$layer, na.rm = T)
+x.dens  <- density(rel_df$layer, na.rm=T)
+df.dens <- data.frame(x=x.dens$x, y=x.dens$y)
+
+
+p_rel_dens <- ggplot() + 
+  geom_area(data = subset(df.dens, x >= q15.9 & x <= q84.1), # 1 Std 68.2%
+            aes(x=x,y=y), fill='#619CFF', alpha=0.8) +
+  geom_area(data = subset(df.dens, x >= q2.3 & x <= q97.7), # 2 Std 95.4%
+            aes(x=x,y=y), fill='#619CFF', alpha=0.6) +
+  geom_area(data = subset(df.dens, x >= q0.01 & x <= q99.9), # 3 Std 99.8%
+            aes(x=x,y=y), fill='#619CFF', alpha=0.3) +
+  geom_vline(xintercept=meanx) +
+  geom_vline(xintercept=medx, color='#FFFFFF') +
+  geom_density(data = rel_df, aes(x = layer, y = ..density..)) +
+  theme_minimal() +
+  labs(title = "Predicted - Observed Kernel Density Estimates",
+       subtitle = "Spring 2012 - Fall 2016",
+       x = "Difference", y = "Density") 
+  
+
+p_kernel_diff_grid <- cowplot::plot_grid(p_abs_map, p_abs_dens, p_rel_map, p_rel_dens,
+                                    labels = c("(A)","","(B)",""))
+#ggsave(p_kernel_diff_grid, filename = "p_kernel_diff_grid.png", dpi = 300, width = 11, height = 7)
+```
+
+
+

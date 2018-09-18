@@ -1,0 +1,677 @@
+---
+title: "Determine Domestic Well Failure During the 2012-2016 Drought"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+bibliography: ref.bib
+date: 2018-06-18
+author: Rich Pauloo
+---
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message = FALSE,
+  error = FALSE,
+  warning = FALSE,
+  cache = TRUE
+)
+```
+
+Packages used.
+```{r}
+library(here)      # for system agnostic file paths
+library(tidyverse) # general purpose data science toolkit
+library(sp)        # spatial objects
+library(raster)    # for raster objects
+library(scales)    # for commas in scales
+library(gstat)     # for idw
+library(colormap)  # for color scales
+library(cowplot)   # for `plot_grid`
+library(dismo)     # for k fold CV
+```
+
+First we need to know the screened intervals for domestic wells in the Central Valley.  
+
+* [PLSS Township polygons](https://catalog.data.gov/dataset/blm-national-public-land-survey-system-polygons)  
+* [Exclusive GSAs: accessed 2018-06-20](https://sgma.water.ca.gov/webgis/index.jsp?appid=gasmaster&rz=true)  
+* 
+```{r}
+# cleaned online state well compeltion report database
+load(here("data","oswcr","clean_dat.RData"))
+
+# mercator projection
+merc <- crs("+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0
++k=1.0 +units=m +nadgrids=@null +no_defs") 
+
+# lat long - WGS84
+ll <- crs("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0") 
+
+# central valley shapefile
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary", 
+                     "Alluvial_Bnd.shp"))
+cv <- spTransform(cv, merc) # transform cv to merc
+cvl <- list("sp.lines", as(cv, 'SpatialLines')) # spatial lines for spplot
+
+# bulletin 118 subbasin shapefile: already in mercator: no transformation necessary
+b118 <- shapefile(here("data","spatial","bulletin_118","I08_B118_CA_GroundwaterBasins.shp"))
+b118 <- spTransform(b118, merc) # transform to mercator
+b118cv <- b118[cv, ] # crop to central valley
+
+# townships shapefile 
+blm <- shapefile(here("data","spatial","BLM","plss_township.shp")) # read in BLM townships
+blm <- spTransform(blm, merc) # transform to mercator
+blmcv <- blm[cv, ] # crop to central valley
+plot(blmcv)
+
+# GSA shapefile (accessed 6/20/2018)
+gsa <- shapefile(here("data","spatial","GSA","GSA_Master.shp")) # read in BLM townships
+gsa <- spTransform(gsa, merc) # transform to mercator
+gsacv <- gsa[cv, ] # crop to central valley
+plot(gsacv)
+
+# domestic wells
+dom <- clean_dat %>% filter(type == "domestic" & !is.na(lat) & !is.na(lon))
+```
+
+
+For 90% of wells, there is no difference between the fields `TotalCompletedDepth` and `BottomOfPerforatedInterval`. Since it's the later that we're interested in, and we have many more records of `TotalCompletedDepth` than `BottomOfPerforatedInterval`, every missing value of `BottomOfPerforatedInterval` will be replaced by the `TotalCompletedDepth`. 
+```{r}
+dom %>% 
+  filter(!is.na(bot) | !is.na(TotalCompletedDepth)) %>% 
+  mutate(d = abs(TotalCompletedDepth - bot)) %>% 
+  ggplot() +
+  geom_histogram(aes(d), binwidth = 10) +
+  coord_cartesian(xlim = c(0,350)) +
+  labs(title = "'TotalCompletedDepth' - 'BottomofPerforatedInterval'",
+       subtitle = "Absolute Difference",
+       x = "'TotalCompletedDepth' - 'BottomofPerforatedInterval'",
+       y = "Count")
+```
+
+```{r}
+# if bot present, keep it, else put in total completed depth
+dom <- dom %>% mutate(bot = ifelse(!is.na(bot), bot, TotalCompletedDepth))
+
+# percentage of data that has bottom of poerforataed interval
+(dom %>% filter(!is.na(bot)) %>% nrow() / nrow(dom)) * 100
+```
+
+The remaining 2.33% of data that lacks depth information can either be imputed, or removed from the analysis. Instead of removing data, let's impute the missing data by an optimzed inverse distance weighting scheme. Wells drilled close together are probably screened in similar sections of the aquifer, so we expect the bottom of the screened interval of nearby wells to be similar. First, we need to create a spatial object and crop observations to central valley study area.
+```{r}
+# make into spdf
+domsp <- SpatialPointsDataFrame(coords = data.frame(dom$lon, dom$lat), data = dom, proj4string = ll)
+
+domsp <- spTransform(domsp, merc) # transform points to mercator
+domcv <- domsp[cv, ] # subset points to those in the central valley
+```
+
+Domestic Wells in the Central Valley account for close to 1/3 of domestic wells in the state, and have ample coverage in the Central Valley. 
+```{r}
+# plot
+plot(domsp, col = "red", pch = 19, cex = .1,
+     main = "Domestic Wells in California", 
+     sub = paste0("(Central Valley nwells = ", nrow(domcv), ")"))
+plot(domcv, add=T, pch = 19, cex = .1, col = "blue") 
+```
+
+Interpolate bottom of screened interval.
+```{r}
+set.seed(1224564) # set seed for reproducibility
+
+# can't have NA values in `bot`: remove them
+domcv_nna <- domcv[!is.na(domcv@data$bot), ] 
+
+# 5-fold cross validation
+nfolds <- 5 
+k <- kfold(domcv_nna, nfolds)
+idwrmse <- rep(NA, 5)
+opt <- list()
+
+# loss function
+RMSE <- function(observed, predicted) {
+  sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+}
+```
+
+Calculate a null model. The null model in this case predicts the mean value at every location in the field.
+```{r}
+null <- RMSE(dom %>% filter(!is.na(bot)) %>% pull(bot), mean(dom$bot, na.rm = T))
+null
+```
+
+Optimze an IDW model.
+```{r, eval = FALSE}
+# test and training data for optimization
+test <- domcv[k == 1, ]         # test set: 20% of data
+train <- domcv[k != 1, ]        # train set: 80% of data
+  
+# function to optimize
+f1 <- function(x, test, train) {
+  nmx <- x[1]                   # paramater to optimize: maxpts in neighborhood
+  idp <- x[2]                   # paramater to optimize: inverse distance power
+  if (nmx < 1) return(Inf)      # constraint: can't have < 1 pt in neighborhood
+  if (idp < .001) return(Inf)   # constraint: small idp weights far pts high
+  m <- gstat(formula=bot~1,    # same formulation as before
+             locations=train,   # 
+             nmax=nmx, 
+             set=list(idp=idp))
+  p <- predict(m, newdata=test, # predicted values from model m
+               debug.level=0)$var1.pred
+  RMSE(test$bot, p)         # function output: this is what optim minimizes
+}
+
+# iterate over the 5 folds
+for(i in 1:nfolds){
+  test <- domcv_nna[k == i, ]         # test set: 20% of data
+  train <- domcv_nna[k != i, ]        # train set: 80% of data
+  
+  # optimze IDW parameters
+  opt[[i]] <- optim(c(8, .5),          # initial values
+                   f1,                # function to minimize or maximize
+                   test=test,         # ... argument to be passed to f1
+                   train=train)       # ... argument to be passed to f1
+      
+  # IDW with optimum parameters
+  m <- gstat(formula=bot~1, locations=train, nmax=opt[[i]]$par[1], set=list(idp=opt[[i]]$par[2]))
+  p <- predict(m, newdata=test, debug.level=0)$var1.pred # predict test set
+  idwrmse[i] <-  RMSE(test$bot, p) # calculate error
+}
+
+# average the optimal parameters
+nmax <- sapply(opt, function(x) x$par[1])
+idp <- sapply(opt, function(x) x$par[2])
+
+# save some of these model parameters to avoid re-running
+write_rds(nmax, "nmax.rds")
+write_rds(idp, "idp.rds")
+write_rds(idwrmse, "idwrmse.rds")
+```
+
+View model results.
+```{r}
+# read in previously written data
+nmax <- read_rds("nmax.rds")
+idp <- read_rds("idp.rds")
+idwrmse <- read_rds("idwrmse.rds")
+
+# data frame to table
+data.frame(model = 1:5, nmax = round(nmax, 3), idp = round(idp, 3), rmse = round(idwrmse,3)) %>% rbind.data.frame(data.frame(model = "null model", nmax = "NA", idp = "NA", rmse = round(null, 3) )) %>% 
+  knitr::kable()
+```
+
+From this table it appears that there are at multiple optima in the objective function space, dependent on the train-test split. Moreover, the IDW model clearly outperforms the null model. We select the third fold's optimal parameters to impute the missing perforated intervals.
+```{r}
+has_bot     <- domcv[!is.na(domcv@data$bot), ] # data with bot
+missing_bot <- domcv[is.na(domcv@data$bot), ]  # data without bot
+
+# model specification: interpoalte bot from lat/lon
+m <- gstat(formula=bot~1, locations=has_bot, nmax=nmax[3], set=list(idp=idp[3]))
+idw_bot <- predict(m, newdata=missing_bot, debug.level=0)$var1.pred # predict data without bot
+
+# overwrite missing values with predicted ones
+na_ind <- which(is.na(domcv@data$bot), domcv@data$bot) # index of NA values in domcv bot data
+domcv@data$bot[na_ind] <- idw_bot # replace those NA values with the interpolated ones
+
+#write_rds(domcv, "domcv.rds")
+```
+
+
+***  
+
+# Groundwater Levels During Drought
+
+Because we're assuming wells don't age out during the drought, we simply find maximum depth per raster cell during 2012-2016 drought and extract these values at every location that we have a domestic well.
+```{r}
+domcv <- read_rds("domcv.rds")
+ml <- read_rds("ml.rds") # list of interpolated gw level predictions
+e <- lapply(2:10, function(x) ml[[x]]$Ensemble) # get the drought: 2012-2016
+es <- stack(e, bands = NULL, native = NULL, RAT = TRUE) # s4 method to stack a list
+#write_rds(es, "es.rds") # save for use in calibration
+emax <- max(es) # mean groundwater depth below land surface 
+```
+
+```{r}
+spplot(emax, # plot the max groundwater depth below land surface 
+       sp.layout = cvl,
+       col.regions = rev(get_col_regions()),
+       main = "Maximum GroundWater Depth Below Surface (2012-2016)")
+```
+
+Now we can extract the maximum groundwater level at each point for our domestic wells.
+```{r}
+names(emax) <- "max_gw" # change the name of the raster layer
+
+# extract the raster max gw level values and bind to spatial points dataframe
+domcv <- raster::extract(emax,     # extract from emax
+                         domcv,    # to domcv points
+                         sp = TRUE)# and add the values to a data frame
+
+# remove the ~1000 wells that fall outside of the raster cells
+domcv <- domcv[!is.na(domcv@data$max_gw), ] 
+```
+
+***  
+
+# Simple Model
+
+The most conservative physical model we can build assumes that if the groundwater level falls at or below the bottom of the perforated interval, the well will go dry. This is calcualted only because it is simple, represents a naieve, overly conservative, and physically impossible scenario. Nonetheless, it is a useful exercise to build a working programatic geospatial model that can be made more complex, and 
+```{r}
+domcv1 <- domcv # copy of the data
+
+# well is dry if max negative gw level falls at or below bottom of perforated interval
+domcv1@data <- domcv1@data %>% 
+  mutate(dry = ifelse(max_gw >= bot, TRUE, FALSE)) 
+```
+
+Now we can visualize counts of well failure.
+```{r}
+# visualize counts of well failure
+domcv1@data %>%
+  ggplot() +
+  geom_bar(aes(dry), fill = c("blue","red")) +
+  coord_flip() +
+  labs(title = "Count of Domestic Well Failure in the Central Valley",
+       subtitle = "Wells that went dry during the 2012-2016 drought",
+       y = "Count",
+       x = "") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+```
+
+And view spatial trends.
+```{r}
+# view spatial trends
+pf <- (sum(domcv1@data$dry == T) / sum(domcv1@data$dry == F))*100 # percent failure
+plot(cv, # plot the well failures
+     main = "Domestic Well Failure During the 2012-2016 Drought",
+     sub = paste0("Percent Failure: ", round(pf,2), "%"))
+points(domcv1[domcv1@data$dry == T, ], col = "red", pch = 19, cex = .1)
+```
+
+Compute Township Ratios for Historical 2012-2016 Drought.
+```{r}
+# GISTools
+town_dry <- GISTools::poly.counts(domcv1[domcv1@data$dry == T, ], blmcv) # counts of dry wells in blmcv
+town_wet <- GISTools::poly.counts(domcv1[domcv1@data$dry == F, ], blmcv) # counts of wet wells in blmcv
+
+# add to blmcv data
+blmcv1 <- blmcv # copy of blmcv 
+blmcv1@data <- blmcv1@data %>% 
+  mutate(dry = town_dry, 
+         wet = town_wet,
+         total = dry + wet,
+         township_ratio = dry / total
+  )
+
+# plot
+spplot(blmcv1, "township_ratio", # plot
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       col = "grey50",
+       main = "Domestic Well Failure Township Ratio (2012-2016 Drought)")
+```
+
+Compute GSA Ratios for Historical 2012-2016 Drought.
+```{r}
+# GISTools
+town_dry <- GISTools::poly.counts(domcv1[domcv1@data$dry == T, ], gsacv) # counts of dry wells in blmcv
+town_wet <- GISTools::poly.counts(domcv1[domcv1@data$dry == F, ], gsacv) # counts of wet wells in blmcv
+
+# add to blmcv data
+gsacv1 <- gsacv # copy of blmcv 
+gsacv1@data <- gsacv1@data %>% 
+  mutate(dry = town_dry, 
+         wet = town_wet,
+         total = dry + wet,
+         township_ratio = dry / total
+  )
+
+# plot
+spplot(gsacv1, "township_ratio", # plot
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       col = "grey30",
+       main = "Domestic Well Failure GSA Ratio (2012-2016 Drought)")
+```
+
+Compute Bulletin 118 Ratios for Historical 2012-2016 Drought.
+```{r}
+# GISTools
+town_dry <- GISTools::poly.counts(domcv1[domcv1@data$dry == T, ], b118cv) # counts of dry wells in blmcv
+town_wet <- GISTools::poly.counts(domcv1[domcv1@data$dry == F, ], b118cv) # counts of wet wells in blmcv
+
+# add to blmcv data
+b118cv1 <- b118cv # copy of blmcv 
+b118cv1@data <- b118cv1@data %>% 
+  mutate(dry = town_dry, 
+         wet = town_wet,
+         total = dry + wet,
+         township_ratio = dry / total
+  )
+
+# plot
+spplot(b118cv1, "township_ratio", # plot
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       col = "grey30",
+       main = "Domestic Well Failure Bulletin 118 Ratio (2012-2016 Drought)")
+```
+
+*** 
+
+# Adding Complexity
+
+Not all wells in the well completion report database are still active. We need a way of knowing if a well has been retired. This information is impossible to tease out of the data, so we will assume a range of retirement ages and proceed with a separate analysis for each.  
+
+We use retirement ages: 30, 35, 40. Because we conservatively calculate retirement age from 2017, during the 4 year drought, the wells in our study don't age out.  
+
+About 5% of records don't have a date associated with them, so it's impossible to know the `year` in which these well were completed. We remove these wells, acknowledging again that our well failure estimates are slightly conservative. A future effort may seek to imput missing well years, or enlist the help of an analyst who references the 5,000+ PDFs to fill in this missing data.  
+
+Currently the data contains records through 2017. Let's visualize all of the domestic well completion reports in the Central Valley.
+```{r}
+# make the year variable numeric
+domcv@data$year <- as.numeric(domcv@data$year)
+
+# plot
+domcv@data %>% 
+  filter(!is.na(year) & year >= 1900 & year <= 2017) %>% # remove impossible values
+  ggplot(aes(year)) + 
+  geom_histogram(color = "white", binwidth = 1, 
+                 fill = colormap(colormaps$viridis, nshades = 118)) +
+  theme_minimal() +
+  labs(title = "Domestic Well Completion Reports",
+       subtitle = "Central Valley. Period of Record: 1900 - 2017",
+       x = "Year",
+       y = "Count"
+  ) +
+  coord_cartesian(xlim = c(1930, 2020)) +
+  scale_x_continuous(breaks = seq(1930, 2020, 10), labels = seq(1930, 2020, 10))
+```
+
+Now we can calculate 3 retirement ages, store them as separate `SpatialPointsDataFrame`s, and visualize how retirement age affects the wells in our study. 
+```{r}
+# copy of the data without missing values and imposisble dates
+domcv2 <- domcv[which(!is.na(domcv@data$year) & 
+                      domcv@data$year <= 2017 &  # remove impossible values
+                      domcv@data$year >= 1900), ]# out of range
+
+# make year a numeric variable
+domcv2$year <- as.numeric(domcv2$year)
+
+# 30 year retirement age
+domcv30 <- domcv2[which(domcv2@data$year >= (2017-30)), ]
+
+# 35 year retirement age
+domcv35 <- domcv2[which(domcv2@data$year >= (2017-35)), ]
+
+# 40 year retirement age
+domcv40 <- domcv2[which(domcv2@data$year >= (2017-40)), ]
+
+# plot
+pal <- colormap(colormaps$viridis, nshades = 4) # color palette
+nwells <- sapply(list(domcv30, domcv35, domcv40), nrow) # nwells per retirement block
+nwells <- nwells %>% format(., big.mark = ",", scientific = FALSE) # commas in label
+nwells <- paste0("(nwell = ", nwells, ")") # complete label
+
+retirement_age <- ggplot()+
+  geom_histogram(data = domcv2@data, mapping = aes(x = year), binwidth = 1, fill = "grey50") +
+  geom_histogram(data = domcv40@data, mapping = aes(x = year), fill = pal[1], binwidth = 1) +
+  geom_histogram(data = domcv35@data, mapping = aes(x = year), fill = pal[2], binwidth = 1) +
+  geom_histogram(data = domcv30@data, mapping = aes(x = year), fill = pal[3], binwidth = 1) +
+  geom_segment(aes(x = 1987, xend = 2017, y = 3000, yend = 3000), 
+               lineend = "butt", linejoin = "mitre", color = pal[3],
+               arrow = arrow(ends = "both", length = unit(0.07, "inches"))) +
+  geom_segment(aes(x = 1982, xend = 2017, y = 3500, yend = 3500), 
+               lineend = "butt", linejoin = "mitre", color = pal[2],
+               arrow = arrow(ends = "both", length = unit(0.07, "inches"))) +
+  geom_segment(aes(x = 1977, xend = 2017, y = 4000, yend = 4000), 
+               lineend = "butt", linejoin = "mitre", color = pal[1],
+               arrow = arrow(ends = "both", length = unit(0.07, "inches"))) +
+  annotate("text", label = paste("30 yr retirement", nwells[1]), x = 2002, y = 3150, color = pal[3]) +
+  annotate("text", label = paste("35 yr retirement", nwells[2]), x = 2002, y = 3650, color = pal[2]) +
+  annotate("text", label = paste("40 yr retirement", nwells[3]), x = 2002, y = 4150, color = pal[1]) + 
+  theme_minimal() + 
+  labs(title = "Active Domestic Wells in the Central Valley",
+       subtitle = "30, 35, 40 year Retirement Ages",
+       y = "Count",
+       x = "Date") +
+  coord_cartesian(xlim = c(1930, 2020), ylim = c(0, 4500)) +
+  scale_x_continuous(breaks = seq(1930, 2020, 10), labels = seq(1930, 2020, 10))
+
+retirement_age
+
+#ggsave(retirement_age, filename = "reitrement_age.png", dpi = 300, height = 6, width = 8)
+```
+ 
+```{r}
+# drougt years according to USGS
+drought_years <- c(1928:1934, 1976:1977, 1987:1992, 2001:2002, 2007:2009, 2012:2016)
+
+# areas of interest will be CV wide to start
+domcv3 <- domcv2@data %>% 
+  filter(StaticWaterLevel <= 1000) %>% # remove impossible values
+  mutate(water_above_bot = bot - StaticWaterLevel) %>% # water column height above well bottom
+  # remove impossible values from input errors, and a few misinterpolated values
+  filter(water_above_bot > 0 & water_above_bot <= 750) %>% 
+  filter(!is.na(year) &              # need to remove NA years
+         !(year %in% drought_years)) # remove drought years
+
+# fit a lognormal distribution to the data
+lnd <- fitdistrplus::fitdist(domcv3$water_above_bot, distr = "lnorm")
+
+# use the modeest package to compute the mode of the log normal distribution
+mode_lnd <- modeest::mlv("lnorm", meanlog = coef(lnd)[1], sdlog = coef(lnd)[2])
+
+# extract fitted `density` values given the paramaters from the fit 
+dlnd <- dlnorm(1:700, coef(lnd)[1], coef(lnd)[2])
+
+# bind the paramaaters in a dataframe
+dlnd <- data.frame(x = 1:700, d = dlnd)
+
+# plot the density along with the density histogram of the data
+ggplot() +
+  geom_histogram(data = domcv3, aes(x = water_above_bot, y = ..density..), binwidth = 10) + 
+  geom_line(data = dlnd, aes(x, d), color = "red") +
+  geom_vline(xintercept = mode_lnd[1]$M, linetype = "dashed") + 
+  theme_minimal() +
+  coord_cartesian(ylim = c(0, 0.008)) + 
+  labs(title = "Water Column Height Above the Well Bottom",
+       subtitle = "Central Valley",
+       x = "Height (ft.)",
+       y = "Count")
+```
+
+We will calculate the most probable water column height per subbasin with ambient groundwater levels data, and then define a tuning parameter, $d$, which is the proportion of distance below the water column that the well sits, and the total height of the water column. We can calibrate this tuning parameter to well failure observation data where it exists.  
+
+First we find the subbasin-level most probable water column height. It is hard to detect departures from normality for sample sizes of 50 or less @Stedinger1980. Therefore, we fit lognormal distributions using maximum liklihood estimation for samples of size 50 or greater. We take the median of the modes generated as the most probable water column height for the remaining samples with insufficient data, and list these sections in Table 2 of the Appendix as regions to be considered for the collection of ambient water level data.
+```{r}
+# join b118 geometry to domcv3 (smaller subset of domcv &`contains`water_above_bot`)
+# first domcv3 needs to be a spatial points df
+xy <- domcv3[, 16:15] # coordinates of domcv3
+domcv5 <- SpatialPointsDataFrame(data = domcv3,
+                                 coords = xy,
+                                 proj4string = ll) # define projection: lat/lon
+                                 
+domcv5 <- spTransform(domcv5, merc)                # transform data to mercator
+domcv5@data <- 
+  cbind.data.frame(over(domcv5, b118cv),           # join the spatial overlay..
+                   domcv5@data)                    # ..of b118cv to domcv5 data
+                          
+
+# fit lognormal distributions to data: return a plot and the mode
+fit_lnd <- function(basin){
+  
+  # filter dataframe to the basin
+  df <- domcv5@data %>% filter(Basin_Subb == basin)
+  
+  # fit a lognormal distribution 
+  lnd <- fitdistrplus::fitdist(df$water_above_bot, # to water_above_bot values
+                               distr = "lnorm",    # lognormal distribution
+                               method = "mle")     # use maximum liklihood
+
+  # use the modeest package to compute the mode of the log normal distribution
+  mode_lnd <- modeest::mlv("lnorm", meanlog = coef(lnd)[1], sdlog = coef(lnd)[2])
+  
+  # extract fitted `density` values given the paramaters from the fit 
+  dlnd <- dlnorm(1:700, coef(lnd)[1], coef(lnd)[2])
+  
+  # bind the paramaaters in a dataframe
+  dlnd <- data.frame(x = 1:700, d = dlnd)
+  
+  # plot
+  p <- ggplot() +
+    geom_histogram(data = df, aes(x = water_above_bot, y = ..density..), binwidth = 10) + 
+    geom_line(data = dlnd, aes(x, d), color = "red") +
+    geom_vline(xintercept = mode_lnd[1]$M, linetype = "dashed") + 
+    theme_minimal() +
+    labs(subtitle = basin, x= "", y="")
+         #x = "Height (ft.)",
+         #y = "Density")
+  
+  # return dataframe
+  return(list(p, mode_lnd[1]$M))
+}
+```
+
+Get subbasins with nwells >= 50, view plots for these basins, and the modes. Modes of most probable water column height appear normally distributed, with a mean of 95.4 feet. Given that these modes are about normally distributed, we assign subbasins without enough observations the mean of the calculated water column heights.
+```{r}
+# must have at least 50 wells to fit distribution: vecotr of subbasin names
+sb <- domcv5@data %>% count(Basin_Subb) %>% filter(n >= 50) %>% pull(Basin_Subb)
+
+# apply function to the subbasins with enough data
+sbl <- lapply(sb, fit_lnd)
+
+# get data from list
+get_dat <- function(n) { lapply(1:length(sb), function(x) {sbl[[x]][[n]]}) }
+sbp <- get_dat(1) # get the plots
+sbm <- do.call(c, get_dat(2)) # get the modes in a vector
+
+# view plots and save
+mode_plots <- plot_grid(sbp[[1]],sbp[[2]],sbp[[3]],sbp[[4]],sbp[[5]],
+                        sbp[[6]],sbp[[7]],sbp[[8]],sbp[[9]],sbp[[10]],
+                        sbp[[11]],sbp[[12]],sbp[[13]],sbp[[14]],sbp[[15]],
+                        sbp[[16]],sbp[[17]],sbp[[18]],sbp[[19]],sbp[[20]],
+                        ncol = 4, nrow = 5) 
+#ggsave(mode_plots, filename="mode_plots.png", dpi = 300, height = 7, width = 9)
+
+# histogram of modes for these subbasins
+most_prob_water_col_h <- data.frame(mode = sbm) %>% 
+  ggplot() + 
+  geom_histogram(aes(mode), binwidth = 18,
+                 fill = colormap(colormaps$viridis, nshades = 6)) +
+  labs(title = "Most Probable Water Column Height Above Well Bottom",
+       subtitle = paste0("By Bulletin 118 Subbasin"),
+       x = "Height (ft)",
+       y = "Count") + 
+  theme_minimal()
+
+most_prob_water_col_h
+#ggsave(most_prob_water_col_h, filename = "most_prob_water_col_h.png", dpi =300, height = 5, width = 6.8)
+
+# investigate spatial dependence of the mode?
+b118cv2 <- b118cv1 # copy the the b118 data
+b118cv2@data <- left_join(b118cv2@data, # join to the mode data
+                          data.frame(Basin_Subb = sb, mode = sbm),
+                          by = "Basin_Subb")
+# plot map
+sp_most_prob_water_col_h <- 
+spplot(b118cv2, "mode",
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       col = "grey30",
+       main = "Most Probable Water Column Height by Bulletin 118 Subbasin (ft)")
+
+sp_most_prob_water_col_h
+
+# assign mean of most prob water column height to msising values
+b118cv2@data <- b118cv2@data %>% 
+  mutate(mode = ifelse(!is.na(mode), mode, mean(mode, na.rm = T)))
+```
+
+![](00_figures/mode_plots_edit.png)  
+
+```{r, eval = FALSE, echo = FALSE}
+png(filename = "sp_most_prob_water_col_h.png")
+  print(sp_most_prob_water_col_h) 
+dev.off()
+```
+
+Now we join the most probable water column heights into a new spatial dataframe and optimize the well position through a tuning parameter `d`. This takes place in another script, `06_calibration.Rmd`, so we export the shapefile as our training set. 
+```{r}
+# copy of data
+domcv6 <- domcv2
+
+# get polygon info into points: join most probable water column height
+#domcv6@data <- cbind.data.frame(domcv6@data,
+                                #sp::over(domcv2, b118cv2))
+
+# calculate water column height (WCH)
+#domcv6@data$wch <- domcv6@data$bot - domcv6@data$mode 
+
+# filter data to wells within retirement age
+#domcv6 <- domcv6[which(domcv6@data$year >= 1987), ] 
+
+# vestige of rules for subsetting domcv6 data
+# remove negative and impossible values: about 5 percent of data
+# & 
+#                  domcv6@data$wch > 0 & 
+#                  domcv6@data$wch <= 1000), ] 
+
+# save 
+write_rds(domcv6, "domcv6_max_gw.rds")
+```
+
+***********************
+***********************
+***********************
+***********************
+
+WHERE I LEFT OFF.
+
+***********************
+***********************
+***********************
+***********************
+
+
+
+***  
+
+# Appendix
+
+#### Table 1
+**Well test** data gaps, by Bulletin 118 Subbasins. Areas with low counts should be prioritized for data collection to inform estimates of *specific capacity*. 
+```{r}
+# make kable
+b118cv1@data %>% 
+  dplyr::select(Basin_ID, Basin_Subb, Basin_Name, Subbasin_N, count, median_sc) %>% 
+  mutate(median_sc = round(median_sc,2),
+         count = ifelse(is.na(count), 0, count),
+         median_sc = ifelse(count <= 15, "insufficient data", median_sc)) %>% 
+  arrange(count) %>% 
+  kable()
+```
+
+#### Table 2
+**Ambient groundwater Level** data gaps, by Bulletin 118 Subbasins. Areas with low counts should be prioritized for data collection to inform estimates of *ambient groundwater levels*. 
+```{r}
+domcv5@data %>% 
+  count(Basin_Subb) %>% 
+  right_join(b118cv@data, by = "Basin_Subb") %>% 
+  rename(count = n) %>% 
+  dplyr::select(Basin_ID, Basin_Subb, Basin_Name, Subbasin_N, count) %>% 
+  mutate(count = ifelse(is.na(count), 0, count)) %>% 
+  dplyr::arrange(count)
+```
+
+
+***  
+
+# References 

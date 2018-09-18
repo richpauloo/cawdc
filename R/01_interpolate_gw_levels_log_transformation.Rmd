@@ -1,0 +1,499 @@
+---
+title: "Interpolate Groundwater Levels"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+date: 2018-06-06
+author: Rich Pauloo
+---
+
+# Introduction  
+
+The purpose of this script is to interpolate groundwater levels in California's Central Valley to determine at-risk domestic wells in the state.  
+
+I will employ an suite of interpolation methods, including Voroni polygons, inverse distance weighting, ordinary kriging, a thin plate spline, and a weighted ensemble of these methods. Each method will be cross-validated against a holdout set of the data to assess model error. When possible, model parameters will be tuned via k-fold cross validation to produce optimal interpolations.  
+
+These water levels will be computed for all available spring and fall data spanning 4 years.  
+
+We restrict our analysis to the Central Valley, which is a more similar hydrogeologic and climatic regime than other basins in the state. Thus a single interpolation in this region should perform better than a gloabl interpolation across differing hydrogeologic and climatic regimes.  
+
+# Assumptions and Sources of Error 
+
+We will ignore the difference between confined and unconfined aquifers, treating the entire groundwater system as one aquifer. Because monitoring well data does not indicate screened interval depths, it is nearly impossible to know if a well's measurement indicates a confined, unconfined, or semiconfined response.  
+
+We also acknowledge that well measurements are taken over a 5 month period spanning January through May, with most observations made in the months of February-April. We take these measurements to represent an seasonal average water table elevation, although the temporal quality of sampling is less than ideal.  
+
+***  
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message = FALSE,
+  error = FALSE,
+  warning = FALSE,
+  cache = TRUE
+)
+```
+
+
+# Code  
+
+Packages used.
+```{r}
+library(here)      # for system agnostic file paths
+library(tidyverse) # general purpose data science toolkit
+library(sp)        # spatial objects
+library(raster)    # for raster objects
+library(dismo)     # for cross validation
+```
+
+
+Load one dataset: Spring 2012. Obtained from the [State of California](https://gis.water.ca.gov/app/gicima/).
+```{r}
+# groundwater elevations as spatial points
+d <- shapefile(here("data", "spatial", "groundwater_elevation",
+                    "GIC_Elevation_Points_S2012_WSEL_p.shp"))
+# central valley alluvial basin boundary
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary",
+                     "Alluvial_Bnd.shp"))
+
+# california state outline
+ca <- shapefile(here("data","spatial","ca_boundary",
+                     "CA_State_TIGER2016.shp"))
+  
+# transform the crs of the central valley to that of the points
+merc <- crs(d)
+cv <- spTransform(cv, merc)
+cvl <- list("sp.lines", as(cv, 'SpatialLines')) # spatial lines for spplot
+```
+
+We now constrain our analysis to the Central Valley and average well observations at the same location.
+```{r}
+d_cv <- d[cv, ] # subset pts to the central valley polygon
+s1 <- zerodist(d_cv)[,1]      # index of set 1: wells wtih an overlapping observation
+s2 <- zerodist(d_cv)[,2]      # index of set 2: wells wtih an overlapping observation
+
+# overlapping wells are NESTED wells. take the smaller observation, which is likely
+# to be the more shallow well
+a = d_cv[s1, ]$DGBS
+b = d_cv[s2, ]$DGBS
+c = pmin(a, b) # parallel minimum between the vectors
+
+# replace DGBS of set 2 wells with min of well observations
+d_cv[s2, "DGBS"] <- c  
+
+# remove set 1 wells
+d_cv2 <- d_cv[-s1, ]          
+
+# plot to ensure all is working
+plot(ca, main = "Groundwater Monitoring Wells in the Central Valley")
+plot(cv, add=T)
+plot(d_cv2, add=T, pch = 16, cex = .2, col = "red")
+```
+
+```{r}
+# when were measurements collected?
+data.frame(month = as.numeric(substr(d_cv2@data$Msmt_Date, 6,7))) %>% 
+  mutate(month_name = ifelse(month == 1, "Jan",
+                      ifelse(month == 2, "Feb",
+                      ifelse(month == 3, "Mar",
+                      ifelse(month == 4, "Apr",
+                      ifelse(month == 5, "May", NA))))),
+         month_name = factor(month_name)) %>% 
+  count(month_name) %>%
+  ggplot() +
+  geom_col(aes(month_name, n)) +
+  scale_x_discrete(limits = c("Jan", "Feb", "Mar", "Apr","May")) +
+  labs(title = "Central Valley Groundwater Level Observations",
+       subtitle = "Collected Spring 2012",
+       x = "Month", y = "Count")
+
+# what do those measurements look like?
+data.frame(dgbs = d_cv2@data$DGBS) %>% 
+  ggplot() + 
+  geom_histogram(aes(dgbs), binwidth = 10) +
+  labs(title = "Groundwater Level Depth Below Land Surface",
+       subtitle = "Collected Spring 2012",
+       x = "Depth Below Land Surface (ft)", y = "Count")
+```
+
+Since our analysis is focused on domestic wells, the great majority of which are screened in shallow aquifers, incredibly deep groundwater surfaces are not of interest to us, because domestic wells would have dried out long before then. In other words, the difference between a water level elevation of 400 and 600 is inconsequential to our analysis. Therefore, we will recode these extreme values to improve our visualization. We also will fix incorrectly coded negative values.  
+
+```{r}
+# remove 7 outliers with a depth below groud surface > 0
+d_cv2 <- d_cv2[d_cv2$DGBS > 0, ] 
+
+#d_cv2[d_cv2$DGBS > 400, ] <- 400 # overwrite extra large values
+```
+
+
+***    
+
+## Inverse Distance Weighting (IDW)
+
+An inverse distance weighting approach, as well as the next two approaches, resquire a raster to interpolate over.
+
+```{r}
+r <- raster(cv)              # create a template raster to interpolate over
+res(r) <- 5000               # resolution: 5000 m
+```
+
+```{r}
+library(gstat)
+idm <- gstat(formula=DGBS~1, locations=d_cv2) # define gstat model
+idp <- interpolate(r, idm) # interpolate
+
+idp <- mask(idp, cv) # constrain raster to cv
+
+idp@data@values <- exp(idp@data@values) # transform back by e^x
+
+png(filename = "log_natural.png")
+  print(
+    spplot(idp,
+       sp.layout = cvl,
+       col.regions = rev(get_col_regions()),
+       main = "IDW Groundwater Depth Below Ground Surface (ft)")
+  )
+dev.off()
+```
+
+Functions to make maps and histograms for different IDW schemes.
+```{r}
+make_map <- function(raster, title){
+  raster %>% 
+    as.data.frame(xy = TRUE) %>% 
+    #mutate(Ensemble = ifelse(Ensemble >= 400, 400, Ensemble)) %>% 
+    ggplot(aes(x,y)) +
+    geom_raster(aes(x,y, fill = var1.pred)) +
+    coord_fixed(1.1) + 
+    theme_void() +
+    labs(fill = "Feet",
+         title = title) +
+    scale_fill_continuous(type = "viridis", na.value="transparent")
+}
+
+make_hist <- function(raster){
+  raster@data@values %>% 
+    data.frame(x = .) %>% 
+    ggplot() +
+    geom_histogram(aes(x), bins = 40, color = "white") +
+    theme_minimal() +
+    coord_cartesian(xlim = c(0, 650), ylim = c(0,600)) +
+    labs(x = "Depth Below Land Sufrace (ft)", y = "Count")
+}
+```
+
+
+```{r}
+# normal
+d_cv2_norm <- d_cv2
+
+# natural log transform DGBS values
+d_cv2_log <- d_cv2
+d_cv2_log@data$DGBS <- log(d_cv2@data$DGBS)
+
+# log 10 transform
+d_cv2_log_10 <- d_cv2
+d_cv2_log_10@data$DGBS <- log10(d_cv2@data$DGBS)
+
+# run the interpolation
+library(gstat)
+interp <- function(spdf){
+  r <- raster(cv) # create a template raster to interpolate over
+  res(r) <- 5000  # resolution: 5000 m
+  idm <- gstat(formula=DGBS~1, locations=spdf) # define gstat model
+  idp <- interpolate(r, idm) # interpolate
+  idp <- mask(idp, cv) # constrain raster to cv
+  return(idp)
+}
+
+# normal
+ni <- interp(d_cv2_norm)
+  
+# natural log
+nli <- interp(d_cv2_log)
+nli@data@values <- exp(nli@data@values) # re-transform
+
+# log 10
+l10i <- interp(d_cv2_log_10)
+l10i@data@values <- 10^(l10i@data@values) # re-transform
+  
+# make maps and histograms
+p1 <- make_map(ni, "No Transformation")
+p2 <- make_map(nli, "Natural Log")
+p3 <- make_map(l10i, "Log Base 10")
+
+h1 <- make_hist(ni)
+h2 <- make_hist(nli)
+h3 <- make_hist(l10i)
+
+library(cowplot)
+plot_grid(p1,p2,p3,h1,h2,h3, nrow=2, ncol=3, align = "h")
+
+# plot differences: need to change the function `fill = layer` + labs(subtitle = "")
+(nli - l10i) %>% make_map("Differenced Interpolations")
+```
+
+
+We now optimze the IDW model. Our objective function is the RMSE, which we seek to minimize. Our decision variables are the maximum number of points in a neighborhood, and the inverse distance power. We constrain the decision space by disallowing neighborhoods with less than 1 point, and very small inverse distance weights.  
+```{r}
+# the function we want to minimize is the RMSE
+RMSE <- function(observed, predicted) {
+  sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+}
+
+f1 <- function(x, test, train) {
+  nmx <- x[1]                   # paramater to optimize: maxpts in neighborhood
+  idp <- x[2]                   # paramater to optimize: inverse distance power
+  if (nmx < 1) return(Inf)      # constraint: can't have < 1 pt in neighborhood
+  if (idp < .001) return(Inf)   # constraint: small idp weights far pts high
+  m <- gstat(formula=DGBS~1,    # same formulation as before
+             locations=train,   # 
+             nmax=nmx, 
+             set=list(idp=idp))
+  p <- predict(m, newdata=test, # predicted values from model m
+               debug.level=0)$var1.pred
+  RMSE(test$DGBS, p)            # function output: this is what optim minimizes
+}
+
+# run the optimization
+set.seed(20150518)
+i <- sample(nrow(d_cv2_log), 0.2 * nrow(d_cv2_log))# sample 20% of observation row ids
+tst <- d_cv2_log[i,]                         # test set is those 20%
+trn <- d_cv2_log[-i,]                        # 80% for train
+opt <- optim(c(8, .5),                   # initial values
+             f1,                         # function to minimize or maximize
+             test=tst,                   # ... argument to be passed to f1
+             train=trn)                  # ... argument to be passed to f1
+opt
+```
+
+We can now view our optimal IDW model. This results in a more smooth interpolation, with beter test error.
+```{r}
+m <- gstat(formula=DGBS~1, 
+           locations=d_cv2_log, 
+           nmax=opt$par[1],          # optimum parameter
+           set=list(idp=opt$par[2])) # optimum parameter
+idw <- interpolate(r, m)
+
+idw <- mask(idw, cv)
+idw@data@values <- exp(idw@data@values) # retransform from ln
+spplot(idw,
+       sp.layout = cvl,
+       col.regions = rev(get_col_regions()),
+       main = "Optimal IDW Groundwater Depth Below Ground Surface (ft)")  
+```
+
+
+***  
+
+## Thin Plate Spline
+
+We now emply another deterministic interpolation approach: the thin plate spline.  
+```{r}
+library(fields)
+
+# natural log transform DGBS values
+d_cv2_log <- d_cv2
+d_cv2_log@data$DGBS <- log(d_cv2@data$DGBS)
+
+
+m <- Tps(                 # thin plate spline model
+       coordinates(d_cv2_log), # xy coords
+       d_cv2_log$DGBS          # field values
+     )
+
+tps <- interpolate(r, m)  # interpolate with this model
+tps <- mask(tps, cv)      # get cv values
+tps@data@values <- exp(tps@data@values) # exponentiate: retransform
+```
+
+```{r}
+spplot(tps,
+       sp.layout = cvl,
+       col.regions = rev(get_col_regions()),
+       main = "TPS Groundwater Depth Below Ground Surface (ft)") 
+```
+
+One problem with areas of missing data is that the thin plate spline predicts negative values in some locations. Let's overwrite these negative values with zeros. 
+```{r}
+tps@data@values[tps@data@values < 0] <- 0
+```
+
+
+***  
+
+## Ordinary Kriging  
+
+We now interpolate groundwater levels using ordinary kriging. 
+```{r}
+g <- as(r, "SpatialGrid")    # convert raster to spatial grid object
+```
+
+Fit an emperical variogram with `gstat`.
+```{r}
+library(gstat)
+
+# natural log transform DGBS values
+d_cv2_log <- d_cv2
+d_cv2_log@data$DGBS <- log(d_cv2@data$DGBS)
+
+gs <- gstat(formula = DGBS ~ 1,    # spatial data, so fitting xy as idp vars
+            locations = d_cv2_log)      # groundwater monitoring well points 
+
+v <- variogram(gs,                 # gstat object
+               width = 5000)       # lag distance
+
+plot(v)
+
+# plot the emperical variogram
+v %>% 
+  mutate(dist = dist/1000)  %>% 
+  ggplot()+ 
+  geom_point(aes(dist, gamma)) +
+  geom_vline(xintercept = 200.000, color = "red") + # range
+  geom_hline(yintercept = 5200, color = "blue") +  # partial sill
+  geom_hline(yintercept = 500, color = "darkgreen") +   # nugget
+  geom_text(aes(2.8e2, 5400, label = "partial sill"), color = "blue") + 
+  geom_text(aes(2.8e2, 700, label = "nugget"), color = "darkgreen") + 
+  geom_text(aes(2.1e2, 6500, label = "range"), color = "red") + 
+  labs(title = "Emperical Semivariance",
+       subtitle = "Via Ordinary Kriging",
+       x = "Distance (km)", y = "Semivariance")
+```
+
+Now fit a model variogram.
+```{r}
+fve <- fit.variogram(v,         # takes `gstatVariogram` object
+                     vgm(0.9,   # partial sill: semivariance at the range
+                         "Exp", # exponential model type
+                         100000,# range: distance where model first flattens out
+                         0.1))  # nugget
+        
+fve                             # the output `variogramModel` object
+
+# plot the variogram model 
+plot(variogramLine(fve,         # takes `variogramModel` object
+                   300000),     # max distance for semivariance values  
+     type='l', 
+     col = "blue",
+     main = "Exponential Variogram Model",
+     xlab = "Distance (m)", ylab = "Gamma")
+points(v[,2:3], pch=20, col='red')
+```
+
+Apply the model to interpolate.
+```{r}
+k <- gstat(formula = DGBS ~ 1,    # still a spatial model: xy are indp vars 
+           locations = d_cv2_log,      # control points -  d_cv2 spdf
+           model = fve)           # model = exponential `variogramModel` object
+
+# predicted values
+kp <- predict(k, g)               # predict values over spatial grid, g with k
+```
+
+Visualize the prediciton and variance.
+```{r}
+# transform: exponentiate back 
+kp@data$var1.pred <- exp(kp@data$var1.pred)
+kp@data$var1.var  <- exp(kp@data$var1.var)
+
+ok <- brick(kp)                          # spatialgrid df -> raster brick obj.
+ok <- mask(ok, cv)                       # mask to cv extent
+names(ok) <- c('Prediction', 'Variance') # name the raster layers in brick
+spplot(ok$Prediction,
+       sp.layout = cvl,
+       col.regions = rev(get_col_regions()),
+       main = "Ordinary Kriging Groundwater Depth Below Ground Surface (ft)")
+```
+
+The kriging variance shows us where our estimates of groundwater depth are most uncertain. These regions are areas where monitoring wells are sparse, where data disagree, or both. Areas with high krigin variance are areas where new wells, if they are to be established, would provide the greatest value in terms of filling in data gaps.
+```{r}
+plot(ok$Variance,  # plot
+     col = cm.colors(n=12, alpha = 1),
+     main = "Ordinary Kriging Variance", axes = 0)
+plot(d_cv2, pch = 16, cex = .2, col = "red", add=T)
+plot(cv, add=T)
+```
+
+***
+
+## Cross Validation and Ensemble
+
+Let's now cross validate three of our four interpolation models (IDW, Thin plate Spline, and Ordinary Kriging) and take a weighted ensemble prediction. We omit the nearest neighbor interpolation because it tends to have more error than all of the other methods.  
+```{r}
+set.seed(1224564) # set seed for reproducibility
+
+# 5-fold cross validation
+nfolds <- 5 
+k <- kfold(d_cv2_log, nfolds)
+
+# intalize empty vectors to fill
+ensrmse <- idwrmse <- tpsrmse <- krigrmse <- rep(NA, 5)
+
+for (i in 1:nfolds) {
+  train <- d_cv2_log[k!=i,]   # train set (80% of data)
+  test <- d_cv2_log[k==i,]    # test set (20% of data)
+  
+  # IDW with optimum parameters
+  m <- gstat(formula=DGBS~1, locations=train, nmax=opt$par[1], set=list(idp=opt$par[2]))
+  p1 <- predict(m, newdata=test, debug.level=0)$var1.pred
+  idwrmse[i] <-  RMSE(test$DGBS, p1)
+  
+  # ordinary kriging 
+  m <- gstat(formula=DGBS~1, locations=train, model=fve)
+  p2 <- predict(m, newdata=test, debug.level=0)$var1.pred
+  krigrmse[i] <-  RMSE(test$DGBS, p2)
+
+  # thin plate spline
+  m <- Tps(coordinates(train), train$DGBS)
+  p3 <- predict(m, coordinates(test))
+  tpsrmse[i] <-  RMSE(test$DGBS, p3)
+
+  # weighted ensemble
+  w <- c(idwrmse[i], krigrmse[i], tpsrmse[i]) # rmse of each method
+  weights <- w / sum(w)                       # standardize weights to 1
+  ensemble <- p1 * weights[1] +               # weight each prediction by rmse
+              p2 * weights[2] +               
+              p3 * weights[3] 
+  ensrmse[i] <- RMSE(test$DGBS, ensemble)     # compute weighted ensemble rmse
+
+}
+
+# compute average RMSE for each cross-validated set
+rmi <- mean(idwrmse)
+rmk <- mean(krigrmse)
+rmt <- mean(tpsrmse)
+rms <- c(rmi, rmt, rmk)
+rms
+
+# rmse for ensemble
+rme <- mean(ensrmse)
+rme
+```
+
+We can now visualize the output of the interpolation models. The mean ensemble test RMSE is slightly lower than the mean of all three models used to generate the model. We will use this model in the next step of this analysis.
+```{r}
+# normalize weights to 1 for comparable results, & so low rmse gets higher weight
+weights <- ( (1/rms) / (sum(1/rms))  )  
+
+s <- stack(idw, ok[[1]], tps)          # make raster stack object
+ensemble <- sum(s * weights)           # create ensemble raster layer
+
+s <- stack(idw, ok[[1]], tps, ensemble)       # combine into one stack
+names(s) <- c('IDW', 'OK', 'TPS', 'Ensemble') # name the layers 
+spplot(s, 
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       main = "Groundwater Depth Below Land Surface (ft)")                                   
+```
+
+Now that we've completed one season, in the next script (`02_interpolate_all_seasons.Rmd`), we will automate the creation of models for each season we have data for.  
+
+

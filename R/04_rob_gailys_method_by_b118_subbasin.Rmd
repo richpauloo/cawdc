@@ -1,0 +1,395 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+
+
+@Gailey2018 showed that for a subset of domestic wells in Tulare county, the greatest uncertianty in a model of well failure came down to retirement age and separation distance. In the study, the calibrated  retirement age was 33 years, which aligns with the range of retirement ages selected in this central valley wide analysis. A gloabl calibration on this scale is more cumbersome, and less important since a range of retirement ages are used, and actual retirement is very difficult to gauge, therefore, it is not pursued. @Gailey2018 also outlined an emperical method to reasonably estimate another important parameter to this physical model: *separation distance* between the bottom of the perforaated interval and the well pump.  
+
+The simple model above assumes that a well runs dry if the water table falls below the bottom of the screened interval. In reality, a well goes dry much before that, as the well pump sits above the bottom of the screened interval, at some separation distance.  
+
+We now calculate the separation distance by following methodology outlined in @Gailey2018 [p. 189].  
+
+> 1) Using a base case (non-drought) distribution of groundwater levels and well construction data for the area of interest, create a histogram of the water column height above the well bottom for the entire well population (no culling on retirement age). 
+
+```{r}
+# drougt years according to USGS
+drought_years <- c(1928:1934, 1976:1977, 1987:1992, 2001:2002, 2007:2009, 2012:2016)
+
+# areas of interest will be CV wide to start
+domcv3 <- domcv@data %>% 
+  filter(StaticWaterLevel <= 1000) %>% # remove impossible values
+  mutate(water_above_bot = bot - StaticWaterLevel) %>% # water column height above well bottom
+  # remove impossible values from input errors, and a few misinterpolated values
+  filter(water_above_bot > 0 & water_above_bot <= 750) %>% 
+  filter(!is.na(year) &              # need to remove NA years
+         !(year %in% drought_years)) # remove drought years
+
+# plot
+ggplot() +
+  geom_histogram(data = domcv3, aes(x = water_above_bot), binwidth = 10) +
+  theme_minimal() +
+  labs(title = "Water Column Height Above the Well Bottom",
+       subtitle = "Central Valley",
+       x = "Height (ft.)",
+       y = "Count")
+```
+
+> 2) Fit a statistical distribution function to the histogram. The function is likely to be a lognormal distribution because the distribution truncates at zero and would not include physically impossible negative values.  
+
+> 3) Pick the water column height at the function mode as the most probable occurrence.  
+
+```{r}
+# fit a lognormal distribution to the data
+lnd <- fitdistrplus::fitdist(domcv3$water_above_bot, distr = "lnorm")
+
+# use the modeest package to compute the mode of the log normal distribution
+mode_lnd <- modeest::mlv("lnorm", meanlog = coef(lnd)[1], sdlog = coef(lnd)[2])
+
+# extract fitted `density` values given the paramaters from the fit 
+dlnd <- dlnorm(1:700, coef(lnd)[1], coef(lnd)[2])
+
+# bind the paramaaters in a dataframe
+dlnd <- data.frame(x = 1:700, d = dlnd)
+
+# plot the density along with the density histogram of the data
+ggplot() +
+  geom_histogram(data = domcv3, aes(x = water_above_bot, y = ..density..), binwidth = 10) + 
+  geom_line(data = dlnd, aes(x, d), color = "red") +
+  geom_vline(xintercept = mode_lnd[1]$M, linetype = "dashed") + 
+  theme_minimal() +
+  coord_cartesian(ylim = c(0, 0.008)) + 
+  labs(title = "Water Column Height Above the Well Bottom",
+       subtitle = "Central Valley",
+       x = "Height (ft.)",
+       y = "Count")
+```
+
+> 4) Based on Figure 34a and Table 9, subtract from the most-probable water column the values
+used for pump operation (drawdown, submergence and operating margin). The remainder
+is an estimate for separation distance.
+
+Now we calculate this separation distance between the bottom of the pump and the bottom of the well.
+
+```{r}
+sc <- 5 # specific capacity [gal/min/ft] 
+pr <- 10 # pumping rate for a domestic well [gal/min]
+dd <- sc * pr # drawdown in ft
+ps <- 5 # pump submergence in ft
+om <- 20 # operating margin in ft
+
+po <- dd + ps + om # pump operation distance [ft]
+
+sep_dist <- as.numeric(mode_lnd[1]$M) - po # most probable water level - pump operating distance
+
+sep_dist
+```
+
+
+*** 
+
+
+
+Assuming the same separation distance for all wells in the central valley is a naieve, but useful first order calculation.  
+
+Now, we repeat this analysis but on the Bulletin 118 subbasin level, with a different specific capactiy and separation distance calculated for wells in each subregion. 
+```{r}
+# now we must do this on a localized scale, because water levels vary on local scales
+domcv4 <- domcv[which(!is.na(domcv@data$WellYield) &  # get wells with well yield: all GPM
+                !is.na(domcv@data$TotalDrawDown) &   # get wells with drawdown: all ft
+                domcv@data$TotalDrawDown > 2 &     # remove impossible values
+                domcv@data$TotalDrawDown < 1000), ]# remove impossible values
+
+# calculate specific capacity
+domcv4@data$specific_capacity <- domcv4@data$WellYield / domcv4@data$TotalDrawDown
+```
+
+Locations with pumping test data are sparse. Thus, our estaimtes of specific capacity are more accurate in regions wtih more test data. In particular, greater data is needed in the Tulare Basin, the West Side of the San Joaquin, and in other parts of the San Joaquin. Presumably, data is sparse in these regions because aquifers are relatively transmissive, and pumping tests are often not necessary. 
+```{r}
+# plot
+plot(b118cv, main = "Locations with Pumping Test Data")
+points(domcv4, pch = 19, cex = 0.1, col = "blue")
+```
+
+Data is sparse. Table 1 in the Appendix shows well test data by subbasin, and should inform data gaps and areas for data collection. For the purposes of this analysis, if a Subbasin had 15 or more well tests, the median specific capacity determined from these tests were assigned to the subbasin, otherwise the mean specific capacity of 2.4 gpm/ft was used.  
+
+We can visualize the specific capacity obtained from these data per Bulletin 118 subbasin, and as a whole. What does this map tell us? For regions where specific capacity is generally higher, an equal pumping rate will lead to higher levels of drawdown. This makes them more vulnerable to well failure.
+```{r}
+# find the polygon each point falls in and store it in the data
+domcv4@data <- cbind.data.frame(domcv4@data, over(domcv4, b118cv))
+
+# group by and summarise data
+b118cv1 <- b118cv # copy of bulletin 118 cv data
+
+# if there are more than 10 observations in a basin, 
+# take the median specific capacity, else use the mean Sc
+b118cv1@data <- domcv4@data %>% # overwrite our copy of b1118cv data
+  group_by(Basin_Subb) %>% 
+  summarise(count = n(), # count the number of well test observations per basin
+            median_sc = ifelse(count >= 15, 
+                               median(specific_capacity), 
+                               NA)) %>% 
+  right_join(b118cv@data, by = "Basin_Subb") %>% # join with the b118cv data
+  mutate(median_sc = ifelse(is.na(median_sc), 
+                            domcv4@data$specific_capacity %>% median(), 
+                            median_sc))
+
+# plot map
+msc_p <- 
+spplot(b118cv1, "median_sc",
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       col = "grey30",
+       main = "Median Specific Capacity by Bulletin 118 Basin (gpm/ft)")
+msc_p
+
+# histogram of those specific capacity values
+specific_capacity_histogram <- 
+domcv4@data %>%
+  ggplot() +
+  geom_histogram(aes(x = specific_capacity), binwidth = 6,
+                 fill = colormap(colormaps$viridis, nshades = 43)) +
+  coord_cartesian(xlim = c(0, 100)) + # zoom in to the main range of the data
+  labs(title = "Specific Capacity of Shallow Aquifers in the Central Valley, California",
+       subtitle = paste0("Computed from Pumping Test Data (nwell = ", nrow(domcv4@data),")"),
+       x = "Specific Capacity (gpm/ft)",
+       y = "Count") + 
+  theme_minimal()
+
+specific_capacity_histogram
+#ggsave(specific_capacity_histogram, filename = "specific_capacity_histogram.png", dpi = 300, height = 5, width = 6.8)
+```
+
+```{r, eval = FALSE, echo = FALSE}
+# save the previous spplot
+png(filename = "median_sc.png")
+  print(msc_p) 
+dev.off()
+```
+
+Now we find the subbasin-level most probable water column height. It is hard to detect departures from normality for sample sizes of 50 or less @Stedinger1980. Therefore, we fit lognormal distributions using maximum liklihood estimation for samples of size 50 or greater. We take the median of the modes generated as the most probable water column height for the remaining samples with insufficient data, and list these sections in the Appendix as regions to be considered for the collection of ambient water level data.
+```{r}
+# join b118 geometry to domcv3 (smaller subset of domcv &`contains`water_above_bot`)
+# first domcv3 needs to be a spatial points df
+xy <- domcv3[, 16:15] # coordinates of domcv3
+domcv5 <- SpatialPointsDataFrame(data = domcv3,
+                                 coords = xy,
+                                 proj4string = ll) # define projection: lat/lon
+                                 
+domcv5 <- spTransform(domcv5, merc)                # transform data to mercator
+domcv5@data <- 
+  cbind.data.frame(over(domcv5, b118cv),           # join the spatial overlay..
+                   domcv5@data)                    # ..of b118cv to domcv5 data
+                          
+
+# fit lognormal distributions to data: return a plot and the mode
+fit_lnd <- function(basin){
+  
+  # filter dataframe to the basin
+  df <- domcv5@data %>% filter(Basin_Subb == basin)
+  
+  # fit a lognormal distribution 
+  lnd <- fitdistrplus::fitdist(df$water_above_bot, # to water_above_bot values
+                               distr = "lnorm",    # lognormal distribution
+                               method = "mle")     # use maximum liklihood
+
+  # use the modeest package to compute the mode of the log normal distribution
+  mode_lnd <- modeest::mlv("lnorm", meanlog = coef(lnd)[1], sdlog = coef(lnd)[2])
+  
+  # extract fitted `density` values given the paramaters from the fit 
+  dlnd <- dlnorm(1:700, coef(lnd)[1], coef(lnd)[2])
+  
+  # bind the paramaaters in a dataframe
+  dlnd <- data.frame(x = 1:700, d = dlnd)
+  
+  # plot
+  p <- ggplot() +
+    geom_histogram(data = df, aes(x = water_above_bot, y = ..density..), binwidth = 10) + 
+    geom_line(data = dlnd, aes(x, d), color = "red") +
+    geom_vline(xintercept = mode_lnd[1]$M, linetype = "dashed") + 
+    theme_minimal() +
+    labs(subtitle = basin, x= "", y="")
+         #x = "Height (ft.)",
+         #y = "Density")
+  
+  # return dataframe
+  return(list(p, mode_lnd[1]$M))
+}
+```
+
+Get subbasins with nwells >= 50, view plots for these basins, and the modes. Modes of most probable water column height appear normally distributed, with a mean of 95.4 feet. Given that these modes are about normally distributed, we assign subbasins without enough observations the mean of the calculated water column heights.
+```{r}
+# must have at least 50 wells to fit distribution: vecotr of subbasin names
+sb <- domcv5@data %>% count(Basin_Subb) %>% filter(n >= 50) %>% pull(Basin_Subb)
+
+# apply function to the subbasins with enough data
+sbl <- lapply(sb, fit_lnd)
+
+# get data from list
+get_dat <- function(n) { lapply(1:length(sb), function(x) {sbl[[x]][[n]]}) }
+sbp <- get_dat(1) # get the plots
+sbm <- do.call(c, get_dat(2)) # get the modes in a vector
+
+# view plots and save
+mode_plots <- plot_grid(sbp[[1]],sbp[[2]],sbp[[3]],sbp[[4]],sbp[[5]],
+                        sbp[[6]],sbp[[7]],sbp[[8]],sbp[[9]],sbp[[10]],
+                        sbp[[11]],sbp[[12]],sbp[[13]],sbp[[14]],sbp[[15]],
+                        sbp[[16]],sbp[[17]],sbp[[18]],sbp[[19]],sbp[[20]],
+                        ncol = 4, nrow = 5) 
+#ggsave(mode_plots, filename="mode_plots.png", dpi = 300, height = 7, width = 9)
+
+# histogram of modes for these subbasins
+most_prob_water_col_h <- data.frame(mode = sbm) %>% 
+  ggplot() + 
+  geom_histogram(aes(mode), binwidth = 18,
+                 fill = colormap(colormaps$viridis, nshades = 6)) +
+  labs(title = "Most Probable Water Column Height Above Well Bottom",
+       subtitle = paste0("By Bulletin 118 Subbasin"),
+       x = "Height (ft)",
+       y = "Count") + 
+  theme_minimal()
+
+most_prob_water_col_h
+#ggsave(most_prob_water_col_h, filename = "most_prob_water_col_h.png", dpi =300, height = 5, width = 6.8)
+
+# investigate spatial dependence of the mode?
+b118cv2 <- b118cv1 # copy the the b118 data
+b118cv2@data <- left_join(b118cv2@data, # join to the mode data
+                          data.frame(Basin_Subb = sb, mode = sbm),
+                          by = "Basin_Subb")
+# plot map
+sp_most_prob_water_col_h <- 
+spplot(b118cv2, "mode",
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       col = "grey30",
+       main = "Most Probable Water Column Height by Bulletin 118 Subbasin (ft)")
+
+sp_most_prob_water_col_h
+```
+
+```{r, eval = FALSE, echo = FALSE}
+png(filename = "sp_most_prob_water_col_h.png")
+  print(sp_most_prob_water_col_h) 
+dev.off()
+```
+
+Assign the mean of the modes to all other subbasins and calculate separation distance using the following assumed parameters @Gailey2018. We obtain a negative separation distance for the Tulare Lake Basin. To remedy this, the mean separation distance from the adjacent basins is taken as the Tulare Lake Basin's separation distance. 
+
+```{r, echo = FALSE}
+data.frame(
+  Parameter = c("Pumping Rate for a Domestic Well", "Pump Submergence", "Operating Margin"),
+  Value = c(10, 5, 20),
+  Units = c("gal/min", "ft", "ft")) %>% 
+kable()
+```
+
+```{r}
+# assumed paramaters from Gailey 2018
+pr <- 10 # pumping rate for a domestic well [gal/min]
+ps <- 5 # pump submergence in ft
+om <- 20 # operating margin in ft
+
+# calculate separation distances
+b118cv3 <- b118cv2 # copy of the data
+b118cv3@data <- b118cv3@data %>% 
+  mutate(mode = ifelse(!is.na(mode), mode, mean(mode, na.rm = T)), # impute missing modes with mean
+         median_sc = ifelse(median_sc >= 5, 5, median_sc), # shrink very large values
+         drawdown = median_sc * pr, # calculate drawdown
+         pump_op_dist = drawdown + ps + om, # calculate pump operating distance
+         sep_dist = mode - pump_op_dist) # calculate separation distance
+
+# fix the tulare lake basin's negative separation distance
+sb_adj <- c("5-22.14","5-22.13","5-22.11","5-22.08","5-22.09") # adjacent subbasins
+b118cv3@data$sep_dist[4] <- b118cv3@data %>% # calculate mean sep_d of adj basins
+  filter(Basin_Subb %in% sb_adj) %>% 
+  pull(sep_dist) %>% 
+  mean()
+```
+
+```{r, eval = FALSE, echo = FALSE}
+# save most probable water column heights after filling in missing values
+png(filename = "sp_most_prob_water_col_h_filled.png")
+print(
+  spplot(b118cv3, "mode",
+         sp.layout = cvl, 
+         col.regions = rev(get_col_regions()),
+         col = "grey30",
+         main = "Most Probable Water Column Height by Bulletin 118 Subbasin (ft)")
+)
+dev.off()
+```
+
+Now we take this computed spatial data and join it with our spatial points od domestic wells.
+```{r}
+domcv6 <- domcv # copy of data
+# get polygon info into points
+domcv6@data <- cbind.data.frame(domcv6@data,
+                                sp::over(domcv, b118cv3))
+```
+
+And calculate well failure.
+```{r}
+# well is dry if max negative gw level falls at or below bottom of perforated interval
+domcv6@data <- domcv6@data %>% 
+  mutate(dry = ifelse(max_gw >= bot, TRUE, FALSE))
+
+# GISTools
+town_dry <- GISTools::poly.counts(domcv1[domcv1@data$dry == T, ], blmcv) # counts of dry wells in blmcv
+town_wet <- GISTools::poly.counts(domcv1[domcv1@data$dry == F, ], blmcv) # counts of wet wells in blmcv
+
+# add to blmcv data
+blmcv1 <- blmcv # copy of blmcv 
+blmcv1@data <- blmcv1@data %>% 
+  mutate(dry = town_dry, 
+         wet = town_wet,
+         total = dry + wet,
+         township_ratio = dry / total
+  )
+
+# plot
+spplot(blmcv1, "township_ratio", # plot
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       col = "grey50",
+       main = "Domestic Well Failure Township Ratio (2012-2016 Drought)")
+# GISTools
+town_dry <- GISTools::poly.counts(domcv1[domcv1@data$dry == T, ], gsacv) # counts of dry wells in blmcv
+town_wet <- GISTools::poly.counts(domcv1[domcv1@data$dry == F, ], gsacv) # counts of wet wells in blmcv
+
+# add to blmcv data
+gsacv1 <- gsacv # copy of blmcv 
+gsacv1@data <- gsacv1@data %>% 
+  mutate(dry = town_dry, 
+         wet = town_wet,
+         total = dry + wet,
+         township_ratio = dry / total
+  )
+
+# plot
+spplot(gsacv1, "township_ratio", # plot
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       col = "grey30",
+       main = "Domestic Well Failure GSA Ratio (2012-2016 Drought)")
+# GISTools
+town_dry <- GISTools::poly.counts(domcv1[domcv1@data$dry == T, ], b118cv) # counts of dry wells in blmcv
+town_wet <- GISTools::poly.counts(domcv1[domcv1@data$dry == F, ], b118cv) # counts of wet wells in blmcv
+
+# add to blmcv data
+b118cv1 <- b118cv # copy of blmcv 
+b118cv1@data <- b118cv1@data %>% 
+  mutate(dry = town_dry, 
+         wet = town_wet,
+         total = dry + wet,
+         township_ratio = dry / total
+  )
+
+# plot
+spplot(b118cv1, "township_ratio", # plot
+       sp.layout = cvl, 
+       col.regions = rev(get_col_regions()),
+       col = "grey30",
+       main = "Domestic Well Failure Bulletin 118 Ratio (2012-2016 Drought)")
+```

@@ -1,0 +1,430 @@
+---
+title: "Domestic Well Failure during the 2012-2016 drought (block-level) and Future (tract-level) Simulated Droughts"
+subtitle: ""
+author: Rich Pauloo & Amanda Fencl
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: default
+---
+
+# **INTRODUCTION** 
+
+The purpose of this script is to:
+
+* rerun the previous script but with **block-level MHI data** and **the most accurate well location** information.   
+
+* the 2012-2016 drought outage data from DWR is exact in terms of lat/lon, so we use **block-level** Census data.  
+
+* the future drought simulation well locations are drawn from OSWCR database, with an accuracy of townships centroid (~0.7 miles), so we use **tract-level** Census data.  
+
+* take the 2012-2016 drought, and 1-4 year drought scenarios I passed to Amanda and plot both global and county level distributions of minimum distances from failed wells to their nearest water system.  
+
+* include this in the CA Water Data Challenge.  
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, error = FALSE)
+```
+
+## Exploratory Data Analysis
+```{r}
+library(readr)
+library(tidyverse)
+library(raster)
+library(sp)
+library(here)
+```
+
+Read data.
+```{r}
+# vector of shapefiles to bring into R
+f <- list.files(here("data","amanda_shp","well_failures_block_exact"))
+f <- f[grepl(".shp$", f)] # patterns that end in .shp
+
+l <- vector("list", length(f)) # initalize list
+for(i in 1:5){
+  l[[i]] <- shapefile(here("data",
+                           "amanda_shp",
+                           "well_failures_block_exact",
+                           f[i]))
+}
+```
+
+
+```{r}
+# tables of MHI per drought scenario
+# lapply(l, function(x){table(x@data$MHI16CAT)})
+
+# make MHI into factor
+l <- lapply(l, 
+            function(x){
+              x@data$MHI16CAT <- as.factor(x@data$MHI16CAT); 
+              #levels(x@data$MHI16CAT) <- c("SDAC","DAC", "MHI+")
+              return(x)
+              }
+            )
+```
+
+Plots of distirbution of distances per group for 2012-2016 drought.
+```{r}
+p1 <- l[[1]]@data %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), y = DIST_MI)) +
+  facet_wrap(~County) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Distance from Domestic Well Failures to Closest Water System",
+       subtitle = "2012-2016 drought: County-Level Response",
+       y = "Distance (miles)", x = "Income Level")
+
+p1b <- l[[1]]@data %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), y = DIST_MI,#), 
+               #fill = colormap(colormaps$viridis, nshades = 3), alpha = 0.5) + 
+  fill = MHI16CAT), alpha = 0.5) +
+  coord_flip(ylim = c(0,7.5)) +
+  scale_y_continuous(breaks = c(0,5,10)) +
+  #coord_cartesian(ylim = c(0,7.5)) +
+  theme_bw() +
+  # labs(title = "Distance from Domestic Well Failures to Closest Water System",
+  #      subtitle = "2012-2016 drought: County-Level Response",
+  #      y = "Distance (miles)", x = "Income Level") +
+  labs(title = "Distance from Well Failure to Closest Water System",
+       y = "Distance (miles)", x = "Income Level") +
+  scale_fill_viridis_d() +
+  guides(fill = FALSE)
+
+p1b
+
+# ggsave(p1b, filename = "global_level_2012_2016.pdf", 
+#        height = 6, width = 8, device = cairo_pdf)
+```
+
+Repeat for 1-4 year drought. Below is code for the county level plot, which is crazy big, so it's not included here.
+```{r}
+# extract and combine d1-d4 data
+ll <- l[2:5]
+drought <- paste(1:4, "yr")
+for(i in 1:4){ll[[i]]$drought <- drought[i]}
+l2 <- lapply(ll[1:4], 
+             function(x){
+               y <- x@data
+               y <- y %>% dplyr::select(MHI16CAT, drought, DIST_MI,CountyName)
+               return(y)})
+d14 <- do.call(rbind.data.frame, l2)
+
+p2 <- d14 %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), y = DIST_MI)) +
+  facet_grid(drought~CountyName) +
+  theme_minimal() +
+  labs(title = "Distance from Domestic Well Failures to Closest Water System",
+       subtitle = "Simulated 1, 2, 3 and 4 year droughts: County-Level Response",
+       y = "Distance (miles)", x = "Income Level") +
+  coord_flip(ylim = c(0,10)) +
+  scale_y_continuous(breaks = c(0,5,10))
+
+# ggsave(p2, filename = "county_level_d1_d4.pdf", 
+#        height = 6, width = 24, device = cairo_pdf)
+```
+
+
+```{r}
+p3 <- d14 %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), 
+                   y = DIST_MI, fill = MHI16CAT), alpha = 0.5) +
+  facet_wrap(~drought, ncol = 1) +
+  theme_bw() +
+  labs(title = "Distance between Domestic Well Failures & Closest Water System",
+       subtitle = "Simulated 1, 2, 3 and 4 year droughts: Central Valley Wide Response",
+       y = "Distance (miles)", x = "Income Level") +
+  coord_flip(ylim = c(0,10)) +
+  scale_y_continuous(breaks = c(0,5,10)) +
+  #coord_cartesian(ylim = c(0,9.8))+
+  scale_fill_viridis_d() +
+  guides(fill = FALSE)
+
+#p3
+# ggsave(p3, filename = "global_level_d1_d4.pdf", 
+#        height = 6, width = 8, device = cairo_pdf)
+```
+
+```{r}
+library(colormap)
+cval <- colormap(colormaps$viridis, nshades = 3)
+cval <- cval[c(3,1,2)]
+
+#d14$MHI16CAT <- factor(d14$MHI16CAT)
+#levels(d14$MHI16CAT) <- c("SDAC","DAC", "MHI+")
+p4 <- d14 %>% 
+  # hacky way to reorder levels of MHI to align with 2012-2016 plot and map
+  mutate(temp = ifelse(MHI16CAT == "SDAC", "A", MHI16CAT), 
+         temp = ifelse(MHI16CAT == "DAC", "B", temp),
+         temp = ifelse(MHI16CAT == "MHI+", "C", temp)) %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = drought, 
+                   y = DIST_MI, fill = temp), alpha = 0.5) +
+  theme_bw() +
+  labs(title = "Distance from Well Failures to Closest Water System", #,
+       #subtitle = "Simulated 1, 2, 3 and 4 year droughts: Central Valley Wide Response",
+       y = "Distance (miles)", x = "Drought Duration") +
+  coord_flip(ylim = c(0,9.8)) +
+  scale_fill_viridis_d() +
+  #coord_cartesian(ylim = c(0,9.8))+
+  scale_fill_manual(breaks = c("A","B", "C"), 
+                    labels = c("A","B", "C"),
+                    values = cval) +
+ guides(fill = FALSE)
+p4
+```
+
+
+## Spatial Distributions of MHI 
+```{r}
+# lat/lon projection
+ll <- crs("+proj=longlat +datum=WGS84 +no_defs")
+
+# read central valley alluvial basin boundary and transform to ll
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary",
+                     "Alluvial_Bnd.shp"))
+cv <- spTransform(cv, ll)
+
+library(ggmap) # doesn't plot with SF so need to convert
+location <- c(median(coordinates(cv)[,1]),
+              median(coordinates(cv)[,2]))
+smap <- get_map(location=bbox(cv),
+                color="color",
+                maptype="satellite",
+                source="google", zoom = 6)
+
+sat_bg <- ggmap(smap) # satellite background
+
+# tidy cv 
+cvt <- broom::tidy(cv) 
+```
+
+2012-2016 drought
+```{r, out.width = '100%'}
+l[[1]]@data$drought <- paste0("2012-2016 (n = ", formatC(nrow(l[[1]]),big.mark = ","), ")")
+
+l1t <- broom::tidy(l[[1]])
+pse <- sat_bg + 
+    geom_polygon(data = cvt, 
+                 aes(long, lat, group = group), 
+                 color = "black", fill = "white", alpha = 0.5) +
+    geom_point(data = l1t, 
+               aes(coords.x1, coords.x2, color = MHI16CAT), 
+               alpha = 0.4, size = 1) +
+    #facet_wrap(~ drought, nrow = 1, strip.position="bottom") +
+    coord_fixed(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+    theme_void() +
+    scale_color_viridis_d("Income Level", breaks = c("MHI+","DAC","SDAC"),
+                       labels = c("MHI+","DAC","SDAC")) +
+    labs(title = "Socioeconomic Status") +
+    guides(colour = guide_legend(override.aes = list(size=3)))
+
+pse
+```
+
+```{r}
+library(cowplot)
+title <- ggdraw() + draw_label("2012-2016 Drought", fontface='bold')
+
+comb <- plot_grid(p1b, pse, align = "h")
+
+d12_16 <- cowplot::plot_grid(title, comb, ncol = 1, rel_heights = c(0.1, 1))
+
+d12_16
+
+# ggplot2::ggsave(d12_16, filename = "p_d12_16.png", dpi = 300, height = 6, width = 10)
+```
+
+Future droughts
+```{r, out.width = '100%'}
+# tidy points
+dt <- vector("list", 4) # empty list
+dsp <- l[2:5] # spatial data list
+title <- c("1 yr", "2 yr", "3 yr", "4 yr") # group titles
+n <- sapply(l2, nrow) # wells dry per drought
+n <- formatC(n, big.mark = ",")
+
+for(i in 1:4){
+  dt[[i]] <- broom::tidy(dsp[[i]])
+  dt[[i]]$drought <- paste0(title[i], " (n = ", n[i], ")")
+  dt[[i]] <- dt[[i]] %>% dplyr::select(coords.x1, coords.x2,
+                                       MHI16CAT, drought, DIST_MI)
+}
+
+dtb <- do.call(rbind.data.frame, dt) # bind into one df
+dtb <- dtb %>% filter(!is.na(MHI16CAT))
+
+pse2 <- sat_bg + 
+    geom_polygon(data = cvt, 
+                 aes(long, lat, group = group), 
+                 color = "black", fill = "white", alpha = 0.5) +
+    geom_point(data = dtb, 
+               aes(coords.x1, coords.x2, color = MHI16CAT), 
+               alpha = 0.4, size = 1) +
+    facet_wrap(~ drought, strip.position="bottom", nrow=2, ncol=2) +
+    coord_fixed(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+    theme_void() +
+    scale_color_viridis_d() +
+    labs(title = "Socioeconomic Status") + #,
+         #color = "Income Level") +
+    guides(colour = guide_legend(override.aes = list(size=3))) +
+  guides(color = FALSE)
+
+pse2
+```
+
+```{r}
+title2 <- ggdraw() + draw_label("Future 1-4 Year Long Droughts", fontface='bold')
+
+comb <- plot_grid(p4, pse2, align = "h")
+
+d1_4 <- cowplot::plot_grid(title2, comb, ncol = 1, rel_heights = c(0.1, 1))
+
+d1_4
+ggplot2::ggsave(d1_4, filename = "p_d14.png", dpi = 300, height = 6, width = 10)
+```
+
+Tables of summary stats 
+```{r}
+library(kableExtra)
+library(knitr)
+
+table_1 <- l[[1]]@data %>% 
+  group_by(MHI16CAT) %>% 
+  summarise(median_d = median(DIST_MI), 
+            n_well_failures = n()) %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  rename(`income_level` = MHI16CAT) %>% 
+  arrange(desc(median_d)) %>% 
+  mutate(median_d = round(median_d, 2)) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>% 
+  footnote(general = c("median_d : median distance from well failure to closest water system (miles); ", 
+                      "MHI+ : >= CA median household income in 2016 ($63,783); ",
+                      "DAC  : 80% of MHI; ", "SDAC : 60% of MHI ")
+           )
+
+
+write_rds(table_1, here("code","01_presentations","final_submission","data","table_1.rds"))
+
+# drought 1 yr - drought 4 year table
+temp <- d14 %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  group_by(drought, MHI16CAT) %>% 
+  summarise(median_d = median(DIST_MI), 
+            n_well_failures = n()) %>% 
+  ungroup() %>% 
+  dplyr::select(-drought) %>% 
+  mutate(median_d = round(median_d, 2)) %>% 
+  rename(`income_level` = MHI16CAT) %>% 
+  mutate(n_well_failures = formatC(n_well_failures, big.mark = ","))
+  
+temp <- temp[c(2,1,3,5,4,6,8,7,9,11,10,12), ] # reorder rows
+  
+table_2 <- temp %>% 
+  knitr::kable() %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>% 
+  group_rows("1 yr drought", 1, 3) %>%
+  group_rows("2 yr drought", 4, 6) %>% 
+  group_rows("3 yr drought", 7, 9) %>%
+  group_rows("4 yr drought", 10, 12) %>% 
+  footnote(general = c("median_d : median distance between from failure to closest water system (miles) "))
+
+write_rds(table_2, here("code","01_presentations","final_submission","data","table_2.rds"))
+```
+
+Median distance between well failures and water systems for 2012-2016 drought doens't show a difference between MHI+ and DAC. But SDAC seem better off. For future droughts, SDAC is always further than MHI+ and DAC. This can be explained by underreporting during the 2012-2016 drought of SDAC communities.
+
+***  
+
+# **STATISTICS** 
+
+## ANOVA
+
+$H_0 : \mu_{SDAC} = \mu_{DAC} = \mu_{MHI+}$  
+
+$H_1 : at \space least \space one \space mean \space isn't \space = to \space others$  
+
+Are there are significant difference in the means between SDAC, DAC, and MHI+ for the 2012-2016 drought?
+```{r}
+res_aov <- aov(DIST_MI ~ MHI16CAT, data = l[[1]]@data)
+summary(res_aov)
+```
+
+## Tukey Multiple pariwise comparisons
+```{r}
+TukeyHSD(res_aov)
+```
+
+
+The ANOVA suggests that we accept $H_1$, and Tukey's multiple pariwise comparisons suggests that there is a significant difference between all groups. However, we haven't checked if the assumptions of the ANOVA are met.
+
+## Check assumptions of ANOVA
+
+The ANOVA test assumes that:  
+
+* the data are normally distributed  
+* the variance across groups are homogeneous  
+
+We can check that with some diagnostic plots.  
+
+### Check the homogeneity of variance assumption
+
+The residuals versus fits plot can be used to check the homogeneity of variances.  
+
+In the plot below, there is no evident relationship between residuals and fitted values (the mean of each groups), which is good. So, we can assume the homogeneity of variances.
+
+```{r}
+# 1. Homogeneity of variances
+plot(res_aov, 1)
+```
+
+It's also possible to use Bartlett's test or Levene's test to check the homogeneity of variances.  
+
+Levene's test is less sensitive to departures from normal distribution. 
+```{r}
+library(car)
+leveneTest(DIST_MI ~ MHI16CAT, data = l[[1]]@data)
+```
+From the output above we can see that the p-value is less than the significance level of 0.05. This means that there is evidence to suggest that the variance across groups is statistically significantly different. Therefore, we cannot assume the homogeneity of variances in the different treatment groups.
+
+### Relaxing the homogeneity of variance assumption
+
+The classical one-way ANOVA test requires an assumption of equal variances for all groups. In our data, the homogeneity of variance assumption turned out to be a problem: the Levene test was significant.
+
+> How do we save our ANOVA test, in a situation where the homogeneity of variance assumption is violated?  
+
+An alternative procedure (i.e.: Welch one-way test), does not require that assumption is implemented in the function `oneway.test()`, but we should really do multiple pairwise t-test with no assumption of equal variances, and no pooling of the SDs. 
+
+In this case, we find the same results as in the ANOVA: **there is a significant difference  between all groups.** This is pretty obvious from the plots, and confirmed by these tests.
+
+```{r}
+# ANOVA test with no assumption of equal variances
+oneway.test(DIST_MI ~ MHI16CAT, data = l[[1]]@data)
+
+# Pairwise t-tests with no assumption of equal variances
+pairwise.t.test(l[[1]]@data$DIST_MI, l[[1]]@data$MHI16CAT,
+                 p.adjust.method = "BH", pool.sd = FALSE)
+```
+
+
+Note that, a non-parametric alternative to one-way ANOVA is Kruskal-Wallis rank sum test, which can be used when ANNOVA assumptions are not met. Again, we see that there is a significant difference between groups.
+```{r}
+kruskal.test(DIST_MI ~ MHI16CAT, data = l[[1]]@data)
+```
+
+
+

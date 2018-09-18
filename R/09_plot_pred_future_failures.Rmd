@@ -1,0 +1,202 @@
+---
+title: "Plot Future Drought Scenario predicitons form spatial model"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    toc_depth: 2
+    code_folding: hide
+    highlight: "pygments"
+date: 2018-08-09
+author: Rich Pauloo
+---
+
+With the future drought output from `06_calibration_herve_alvar_graham_calib_TS.Rmd`, I now make plots of predicted well failures at 1,2,3,4 years, as well as well failures during the 2012-2016 drought. 
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message    = FALSE,
+  error      = FALSE,
+  warning    = FALSE,
+  cache      = TRUE
+)
+```
+
+# Data Setup
+
+Packages used.
+```{r}
+# library(here)      # for system agnostic file paths
+library(GISTools)  # counting points in polygons with poly.counts()
+library(raster)    # for raster objects
+library(tidyverse) # general purpose data science toolkit
+library(sp)        # spatial objects
+library(gridExtra)
+library(ggplot2)
+ 
+theme_close = function(base_size = 12, base_family = "") {
+  theme_grey(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      # Specify panel options
+      panel.margin = unit(0, "lines")  
+    )
+}
+```
+
+# Data
+```{r}
+# lat/lon projection
+ll <- crs("+proj=longlat +datum=WGS84 +no_defs")
+
+# read central valley alluvial basin boundary and transform to ll
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary",
+                     "Alluvial_Bnd.shp"))
+cv <- spTransform(cv, ll)
+
+# observed dry wells during 2012-2016 drought
+dw <- shapefile(here("data", "amanda_shp", "well_failures", "d_12_16.shp"))
+
+# predicted droughts from spatial model
+d1 <- shapefile(here("data", "amanda_shp", "well_failures", "d1.shp")) # 1 yr
+d2 <- shapefile(here("data", "amanda_shp", "well_failures", "d2.shp")) # 2 yr
+d3 <- shapefile(here("data", "amanda_shp", "well_failures", "d3.shp")) # 3 yr
+d4 <- shapefile(here("data", "amanda_shp", "well_failures", "d4.shp")) # 4 yr
+```
+
+
+Make pretty
+```{r}
+n <- sapply(list(dw, d1, d2, d3, d4), length)
+n <- formatC(n, big.mark = ",")
+
+library(sf)
+cvsf <- st_as_sf(cv)
+dwsf <- st_as_sf(dw) %>% mutate(drought = paste0("2012-2016 (n = ", n[1], ")"))
+d1sf <- st_as_sf(d1) %>% mutate(drought = paste0("1 yr (n = ", n[2],")"))
+d2sf <- st_as_sf(d2) %>% mutate(drought = paste0("2 yr (n = ", n[3],")"))
+d3sf <- st_as_sf(d3) %>% mutate(drought = paste0("3 yr (n = ", n[4],")"))
+d4sf <- st_as_sf(d4) %>% mutate(drought = paste0("4 yr (n = ", n[5],")"))
+
+#d <- rbind.data.frame(d1sf, d2sf, d3sf, d4sf)
+d <- list(dwsf, d1sf, d2sf, d3sf, d4sf) # list of sf objects to plot
+pl <- vector("list", 5) # initalize list of length 5 
+
+for(i in 1:5){
+  pl[[i]] <- ggplot(d[[i]]) +
+    geom_sf(data = cvsf) +
+    geom_sf(data = d[[i]], alpha = 0.4, size = 0.1, color = "red") +
+    facet_wrap(~ drought, nrow = 1) +
+    theme_bw()
+}
+
+library(cowplot)
+cp <- plot_grid(pl[[1]], pl[[2]], pl[[3]], pl[[4]], pl[[5]], align = "h", nrow = 1)
+
+# now add the title
+title <- ggdraw() + 
+  draw_label("Historic and Future Drought Impact on Domestic Well Failures in California's Central Valley", fontface='bold')
+cpt <- plot_grid(title, cp, ncol=1, rel_heights=c(0.1, 1)) 
+# ggplot2::ggsave(cpt, filename = "cpt.pdf", 
+#                 dpi = 300, device = cairo_pdf, 
+#                 height = 5, width = 15)
+```
+
+Add satelite map
+```{r}
+library(ggmap) # doesn't plot with SF so need to convert
+location <- c(median(coordinates(cv)[,1]),
+              median(coordinates(cv)[,2]))
+smap <- get_map(location=bbox(cv),
+                color="color",
+                maptype="satellite",
+                source="google", zoom = 6)
+
+sat_bg <- ggmap(smap) # satellite background
+
+cvt <- broom::tidy(cv) # tidy cv 
+
+dt <- vector("list",4) # empty list
+dsp <- list(dw, d1, d2, d3, d4) # spatial data
+title <- c("2012-2016", "1 yr", "2 yr", "3 yr", "4 yr") # group titles
+
+for(i in 2:5){
+  dt[[i]] <- broom::tidy(dsp[[i]])
+  dt[[i]]$drought <- paste0(title[i], " (n = ", n[i], ")")
+  #dt[[i]] <- dt[[i]] %>% dplyr::select(coords.x1, coords.x2, drought)
+}
+
+dtb <- do.call(rbind.data.frame, dt) # bind into one df
+
+pred_1_2_3_4 <- sat_bg + 
+    geom_polygon(data = cvt, aes(long, lat, group = group), color = "black", fill = "white", alpha = 0.3) +
+    geom_point(data = dtb, aes(coords.x1, coords.x2), alpha = 0.4, size = 0.5, color = "red") +
+    facet_wrap(~ drought, nrow = 1, strip.position="bottom") +
+    coord_fixed(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+    theme_void() +
+    labs(title = "The Impact of Future Drought on Domestic Well Failure",
+         subtitle = "1, 2, 3 and 4 year droughts (starting January 2018)") 
+  
+# ggplot2::ggsave(pred_1_2_3_4, filename = "pred_1_2_3_4.png", 
+#                 dpi = 300, height = 6, width = 16)
+# readr::write_rds(pred_1_2_3_4, "pred_1_2_3_4.rds")
+```
+
+Chloropleth map of density of well failure at B118 SB level
+```{r}
+# bulletin 118 shapefile in central valley
+b118cv <- read_rds("b118cv.rds")
+b118cv <- spTransform(b118cv, ll)
+# calculate number of dry wells per areal unit for each drought
+b118cv@data$dry_d1 <- poly.counts(d1, b118cv)
+b118cv@data$dry_d2 <- poly.counts(d2, b118cv)
+b118cv@data$dry_d3 <- poly.counts(d3, b118cv)
+b118cv@data$dry_d4 <- poly.counts(d4, b118cv)
+
+# convert to sf
+b118cvsf <- st_as_sf(b118cv)
+b118cvsf$area <- st_area(b118cvsf)
+
+# calculate density
+b118cvsf <- b118cvsf %>% 
+  mutate(area = as.numeric(area),
+         # convert m2-> km2 -> 100 km
+         d1_100km2 = (dry_d1/area)*1000000 * sqrt(100)*2,
+         d2_100km2 = (dry_d2/area)*1000000 * sqrt(100)*2,
+         d3_100km2 = (dry_d3/area)*1000000 * sqrt(100)*2,
+         d4_100km2 = (dry_d4/area)*1000000 * sqrt(100)*2)
+
+# tidy
+b118cv_long <- gather(b118cvsf, "drought", "density", 
+                      c(d1_100km2, d2_100km2, d3_100km2, d4_100km2))
+# b118cvsp <- as(b118cv_long, "Spatial") # convert to sp
+# b118cvt <- broom::tidy(b118cvsp, region = "Basin_Subb") # tidy to data.frame
+# b118cvsp$polyID <- sapply(slot(b118cvsp, "polygons"), function(x) slot(x, "ID"))
+# b118cvt <- merge(b118cvt, b118cvsp, by.x = "id", by.y="polyID")
+
+# viz
+library(leaflet)
+b118cv_long$lab <- cut(x = b118cv_long$density, breaks = seq(0,14,1),
+                       labels = c("0-1","1-2","2-3","3-4","4-5","5-6","6-7",
+                                  "7-8","8-9","9-10","10-11","11-12","12-13","13-14"))
+b118cv_long$lab[is.na(b118cv_long$lab)] <- "0-1"
+
+p_temp <- sat_bg +
+  geom_sf(data = b118cv_long, aes(fill = lab), inherit.aes = FALSE) +
+  scale_fill_viridis_d() +
+  theme_bw() + 
+  facet_wrap(~drought, nrow = 1, strip.position="bottom") +
+  coord_sf(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+  theme_void() + theme(legend.position = "bottom") +
+  guides(fill=guide_legend(nrow=1,byrow=TRUE))
+
+ggplot2::ggsave(p_temp, filename= "density_pred_1_2_3_4.png", 
+                dpi = 300, height = 6, width = 16)
+getwd()
+```
+
+

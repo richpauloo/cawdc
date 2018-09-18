@@ -1,0 +1,821 @@
+---
+title: "Domestic Well Failure Model Calibration"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+    highlight: "pygments"
+date: 2018-07-03
+author: Rich Pauloo
+---
+
+# Introduction
+
+The purpose to this script use the cleaned test data of well failure during the 2012-2016 drought (`dwcv.shp`) to calibrate two tuning parameters ($d$ & $a$) in the physical model.  
+
+$d$ is the proportion of total water column height that the pump sits in. For example, if the pump sits halfway between the top of the water column and the bottom of the screened interval, $d = 0.5$. Formally, $0 \le d \le 1$, and for $d$ near $1$, the pump is near the bottom of the screened interval.  
+
+$a$ is the age at which wells are retired. Average reasonable values for this parameter range from $20-60$ years, so these are set as constraints on retirement age: $20 \le d \le 60$.  
+
+***  
+
+# Assumptions
+
+This study assumes that in townships with well failure reports $\ge 60$, that the reporting is compelete for the township. This allows us to calculate a failure ratio for townships with failures $\ge 60$ during the drought, and we further assume that calibration townships represet a spatially unbiased sample of townships, so that the calibrated parameters can be used across the Central Valley. We also assume that the count of OSCWR domestic well reports in a calibration township represents the total number of domestic wells in that township. The OSWCR database may underrepresent the number of wells because some wells are unreported, leading to an underestimation of the total number of domestic wells in a township. Morevoer, utilizing the full record of wells in the database also overestimates the number of domestic wells in a township because some proportion of the wells are bound to be retired. The underreporting rate and true retirement age are difficult to constrain, but they bias the results in different directions and so have the effect of acting as checks on the other, rather than systematically biasing results in one direction. 
+
+***  
+
+# Code
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message    = FALSE,
+  error      = FALSE,
+  warning    = FALSE,
+  cache      = TRUE
+)
+```
+
+## Data Setup
+
+Packages used.
+```{r}
+library(here)      # for system agnostic file paths
+library(raster)    # for raster objects
+library(tidyverse) # general purpose data science toolkit
+library(sp)        # spatial objects
+library(GISTools)  # counting points in polygons with poly.counts()
+```
+
+Load Central Valley, domestic well failures (test set), and active domestic well (train set) shapefiles.
+```{r}
+# mercator projection
+merc <- crs("+proj=merc +lon_0=0 +k=1 +x_0=0 +y_0=0 
+            +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+# read central valley alluvial basin boundary and transform to mercator
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary",
+                     "Alluvial_Bnd.shp"))
+cv <- spTransform(cv, merc)
+
+# townships shapefile in central valley
+blmcv <- read_rds("blmcv.rds")
+
+# gsa shapefile in central valley
+gsacv <- read_rds("gsacv.rds")
+
+# bulletin 118 shapefile in central valley
+b118cv <- read_rds("b118cv.rds")
+
+# read cleaned test data and transform to mercator
+dw <- shapefile(here("data", "dry_wells", "cleaned_dw", "dwcv.shp"))
+dw <- spTransform(dw, merc)
+
+# read the training data
+domcv6 <- read_rds("domcv6.rds")
+
+# read in water level data
+ml <- read_rds("ml.rds")
+
+# baseline water level defined by the spring measurements
+baseline <- ml[[1]]$Ensemble
+
+# with spplot
+# spplot(baseline, 
+#        col.regions = rev(get_col_regions()),
+#        main = "Spring 2011 Groundwater Depth Below Land Surface")
+
+# with ggplot
+as.data.frame(baseline, xy = TRUE) %>% 
+  ggplot(aes(x,y)) +
+  geom_raster(aes(x,y, fill = Ensemble)) +
+  coord_fixed(1.1) + 
+  theme_void() +
+  labs(fill = "Feet",
+       title = "Groundwater Depth Below Land Surface",
+       subtitle = "Spring 2011") +
+  scale_fill_continuous(type = "viridis", na.value="transparent") 
+```
+
+Now we predict well failure ratio at the level that we have data from. Optimize a tuning parameter $d$.
+
+We use the Spring 2011 groundwater level as the baseline water column height, and extract these data to the spatial points. 
+```{r}
+domcv6 <- raster::extract(baseline, domcv6, # from baseline, get values @pts
+                          # extracted value = avgerage of 4 nearest cells
+                          method = "bilinear", 
+                          # add values onto data.frame of sp object
+                          sp = TRUE)           
+
+# calculate water column height from bottom of screened interval 
+# and ensemble prediction
+domcv6@data$wch_2 <- domcv6@data$bot - domcv6@data$Ensemble
+
+# remove wells that are already dry, about 2% of data
+domcv6 <- domcv6[which(domcv6@data$wch_2 >= 0), ]
+
+# re-transform
+domcv6 <- spTransform(domcv6, merc)
+
+# make a copy for the optimization
+domcv8 <- domcv7 <- domcv6
+```
+
+Calculate proportion of well failures at township level for townships with sufficient data. This will act as the calibration target. 
+```{r}
+# see where we have testing data
+plot(b118cv)
+points(dw, pch = 19, cex = 0.5, col = "blue")
+```
+
+***  
+
+## Calibration
+
+Let's take a look at the townships where we perform the calibration. Assume townships with 60 or more samples have 100% reporting, and that OSWCR wells in the calibration townships (no filtering on retirement age) represent true count of wells in that township.
+```{r}
+# count up the observations in each township
+blmcv_counts <- poly.counts(dw, blmcv)
+
+# those with 60 or more observations for the test set
+# subset for the test set & verify that it aligns with test well locations
+calibration_poly <- blmcv[blmcv_counts >= 60, ]
+# plot the calibration townships
+#plot(calibration_poly, main = "Calibration Townships & Observations") 
+#points(dw, pch = 19, cex = 0.5, col = "blue")
+
+# calculate failure ratio
+fr <- poly.counts(dw, calibration_poly) / 
+      poly.counts(domcv6, calibration_poly)
+
+# can't have failure ratio greater than 1
+calibration_poly <- calibration_poly[fr < 1, ]
+
+fr <- fr[-7] # remove last observation
+
+plot(calibration_poly, main = "Calibration Townships & Observations")
+points(dw[calibration_poly, ], pch = 19, cex = 0.5, col = "blue")
+```
+
+Now we calculate well failure.
+```{r}
+# well is dry if max negative gw level falls at 
+# or below bottom of perforated interval
+domcv6@data <- domcv6@data %>% 
+  mutate(dry = ifelse(max_gw >= bot, TRUE, FALSE))
+
+# count dry and wet wells in calibration townships
+
+# dry wells
+town_dry <- poly.counts(domcv6[domcv6@data$dry == T, ], calibration_poly) 
+
+# wet wells
+town_wet <- poly.counts(domcv6[domcv6@data$dry == F, ], calibration_poly) 
+
+# predicted failure ratios: should be less than actual because in the model
+# wells go dry when water falls at or below the screened interval bottom
+# and wells should fail before this because pumps sit well above this level
+frp <- town_dry / (town_dry + town_wet)
+
+# calculate error
+# loss function (RMSE): de-emphasizes penalty for tails
+RMSE <- function(observed, predicted) {
+  sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+}
+```
+
+<!-- Now we can optimize. We seek to minimize the RMSE via a tuning parameter, $d$. -->
+<!-- ```{r} -->
+<!-- # function to optimize -->
+<!-- fun <- function(x) { -->
+<!--   d <- x                    # paramater to optimize: proportion of WCH distance -->
+<!--   if (d >= 1)   return(Inf) # constraint: d cannot be greater than 1  -->
+<!--   if (d < .001) return(Inf) # constraint: d cannot be less than 0 -->
+
+<!--   # water column heights -->
+<!--   # negative water column heights do not affect optimization -->
+<!--   # these are just wells that are very far gone -->
+<!--   wch <- domcv7@data$bot - domcv7@data$Ensemble -->
+
+<!--   # pump separation distance (ft) from top of water column -->
+<!--   ps <- d * wch -->
+
+<!--   # pump location (ft below land surface) -->
+<!--   pl <- domcv7@data$Ensemble + ps -->
+
+<!--   # put into dataframe and compute well failures -->
+<!--   domcv7@data <- domcv7@data %>%  -->
+<!--     mutate(pl = pl, -->
+<!--            dry = ifelse(max_gw >= pl, TRUE, FALSE)) -->
+
+<!--   # count dry and wet wells in calibration townships -->
+<!--   town_dry <- poly.counts(domcv7[domcv7@data$dry == T, ], calibration_poly) # dry -->
+<!--   town_wet <- poly.counts(domcv7[domcv7@data$dry == F, ], calibration_poly) # wet -->
+
+<!--   # predicted failure ratios -->
+<!--   frp <- town_dry / (town_dry + town_wet) -->
+
+<!--   # calculate error -->
+<!--   return(RMSE(fr, frp)) -->
+<!-- } -->
+
+
+<!-- # single parameter optimization -->
+<!-- set.seed(20150518) -->
+<!-- opt <- optimize(fun,               # function to minimize -->
+<!--                 interval = c(0,1), # interval to search -->
+<!--                 tol = 0.001, -->
+<!--                 maximum = FALSE)                     -->
+<!-- opt  -->
+<!-- ``` -->
+
+<!-- Visualize the objective function space. -->
+<!-- ```{r, eval=FALSE, include=FALSE} -->
+<!-- # function to optimize -->
+<!-- fun <- function(x) { -->
+<!--   d <- x[1]                 # paramater to optimize: proportion of WCH distance -->
+<!--   perc <- x[2] # percentage of repsondants -->
+<!--   if (d >= 1)   return(Inf) # constraint: d cannot be greater than 1  -->
+<!--   if (d < .001) return(Inf) # constraint: d cannot be less than 0 -->
+<!--   if (perc >= 1)   return(Inf)  -->
+<!--   if (perc < .001) return(Inf)  -->
+
+<!--   respf <- 1/perc # respondent factor -->
+
+<!--   # water column heights -->
+<!--   # negative water column heights do not affect optimization -->
+<!--   # these are just wells that are very far gone -->
+<!--   wch <- domcv8@data$bot - domcv8@data$Ensemble -->
+
+<!--   # pump separation distance (ft) from top of water column -->
+<!--   ps <- d * wch -->
+
+<!--   # pump location (ft below land surface) -->
+<!--   pl <- domcv8@data$Ensemble + ps -->
+
+<!--   # put into dataframe and compute well failures -->
+<!--   domcv8@data <- domcv8@data %>%  -->
+<!--     mutate(pl = pl, -->
+<!--            dry = ifelse(max_gw >= pl, TRUE, FALSE)) -->
+
+<!--   # count dry and wet wells in calibration townships -->
+<!--   town_dry <- poly.counts(domcv8[domcv8@data$dry == T, ], calibration_poly) # dry -->
+<!--   town_wet <- poly.counts(domcv8[domcv8@data$dry == F, ], calibration_poly) # wet -->
+
+<!--   # predicted failure ratios -->
+<!--   frp <- town_dry / (town_dry + town_wet) -->
+<!--   frp <- frp * respf -->
+
+<!--   # calculate error -->
+<!--   return(RMSE(fr, frp)) -->
+<!-- } -->
+
+<!-- # optimize with sep distance and percentage reporting -->
+<!-- opt <- optim(c(.5,.5),          # initial paramater values -->
+<!--              fn = fun)  -->
+<!-- opt -->
+
+<!-- mat <- matrix(NA, nrow=99, ncol=99) -->
+<!-- ii <- seq(.1,.3,.1) -->
+<!-- for(i in 1:99){ -->
+<!--   for(j in 1:99){ -->
+<!--     temp <- optim(c(ii[i],ii[j]), fn = fun) -->
+<!--     mat[i, j] = temp$value[1]  -->
+<!--   } -->
+<!-- } -->
+
+
+<!-- # with vectorize -->
+<!-- res <- outer( -->
+<!--   1:3, -->
+<!--   1:3, -->
+<!--   Vectorize(function(i,j) { optim(c(ii[i],ii[j]), fn = fun)} ) -->
+<!-- ) -->
+
+<!-- raster(mat) %>% plot() -->
+<!-- ``` -->
+
+## Optimal Parameters
+
+We calibrate the pump separation proportion, `d` and the welll `a`. 
+```{r}
+# function to optimize
+# function to optimize
+fun <- function(x) {
+  d <- x[1]                 # optimize: proportion of WCH distance
+  a <- x[2]                 # optimize: retirement age
+  if (d >= 1)   return(Inf) # constraint: d cannot be greater than 1
+  if (d < .001) return(Inf) # constraint: d cannot be less than 0
+  if (a >= 60)   return(Inf)# upper bound on reitement age
+  if (a < 20) return(Inf)   # lower bound on retirement age
+  
+  ry <- 2017 - a            # retirement year
+  
+  # subset for active wells
+  domcv9 <- domcv8[which(domcv8@data$year >= ry), ] 
+  
+  # water column heights
+  # negative water column heights do not affect optimization
+  # these are just wells that are very far gone
+  wch <- domcv9@data$bot - domcv9@data$Ensemble
+  
+  # pump separation distance (ft) from top of water column
+  ps <- d * wch
+  
+  # pump location (ft below land surface)
+  pl <- domcv9@data$Ensemble + ps
+  
+  # put into dataframe and compute well failures
+  domcv9@data <- domcv9@data %>% 
+    mutate(pl = pl,
+           dry = ifelse(max_gw >= pl, TRUE, FALSE))
+
+  # count dry and wet wells in calibration townships
+  town_dry <- poly.counts(domcv9[domcv9@data$dry == T, ], calibration_poly)#dry
+  town_wet <- poly.counts(domcv9[domcv9@data$dry == F, ], calibration_poly)#wet
+  
+  # actual failure ratios
+  # calculate actual failure ratio
+  # fr <- poly.counts(dw, calibration_poly) / 
+  #       poly.counts(domcv9, calibration_poly)
+  #fr[fr >= 1] <- 1
+
+  # predicted failure ratios
+  frp <- town_dry / (town_dry + town_wet)
+  
+  # calculate error
+  return(RMSE(fr, frp))
+}
+
+
+# optimize with sep distance and retirement age
+opt <- optim(c(.5,30),  # initial paramater values
+             fn = fun) 
+opt
+```
+
+## Null Model 
+
+We also calculate a null model which assumes the calibrated retirement age, but $d = 1$, which is equivalent to the most simple model: that the pump sits at the well bottom. The null model returns more than 2 times the error of our optimzed model.
+```{r}
+# calculate null model
+a = opt$par[2]
+d = 1
+
+########################################################################
+  ry <- 2017 - a # retirement year
+
+  # subset for active wells
+  domcv9 <- domcv8[which(domcv8@data$year >= ry), ] 
+  
+  # water column heights
+  # negative water column heights do not affect optimization
+  # these are just wells that are very far gone
+  wch <- domcv9@data$bot - domcv9@data$Ensemble
+  
+  # pump separation distance (ft) from top of water column
+  ps <- d * wch
+  
+  # pump location (ft below land surface)
+  pl <- domcv9@data$Ensemble + ps
+  
+  # put into dataframe and compute well failures
+  domcv9@data <- domcv9@data %>% 
+    mutate(pl = pl,
+           dry = ifelse(max_gw >= pl, TRUE, FALSE))
+
+  # count dry and wet wells in calibration townships
+  town_dry <- poly.counts(domcv9[domcv9@data$dry == T, ], calibration_poly)#dry
+  town_wet <- poly.counts(domcv9[domcv9@data$dry == F, ], calibration_poly)#wet
+  
+  # actual failure ratios
+  # calculate actual failure ratio
+  # fr <- poly.counts(dw, calibration_poly) / 
+  #       poly.counts(domcv9, calibration_poly)
+  # fr[fr >= 1] <- 1
+
+  # predicted failure ratios
+  frp <- town_dry / (town_dry + town_wet)
+  
+  # calculate error
+  RMSE(fr, frp)
+
+########################################################################
+```
+
+## Calibration Results 
+
+We view the observated versus predicted failure ratios from our calibration. Overall, these calibration results are not bad.
+```{r}
+# optimal parameters
+a = opt$par[2]
+d = opt$par[1]
+
+########################################################################
+  ry <- 2017 - a # retirement year
+  domcv9 <- domcv8[which(domcv8@data$year >= ry), ] # subset for active wells
+  
+  # water column heights
+  # negative water column heights do not affect optimization
+  # these are just wells that are very far gone
+  wch <- domcv9@data$bot - domcv9@data$Ensemble
+  
+  # pump separation distance (ft) from top of water column
+  ps <- d * wch
+  
+  # pump location (ft below land surface)
+  pl <- domcv9@data$Ensemble + ps
+  
+  # put into dataframe and compute well failures
+  domcv9@data <- domcv9@data %>% 
+    mutate(pl = pl,
+           dry = ifelse(max_gw >= pl, TRUE, FALSE))
+
+  # count dry and wet wells in calibration townships
+  town_dry <- poly.counts(domcv9[domcv9@data$dry == T, ], calibration_poly)#dry
+  town_wet <- poly.counts(domcv9[domcv9@data$dry == F, ], calibration_poly)#wet
+  
+  # actual failure ratios
+  # calculate actual failure ratio
+  # fr <- poly.counts(dw, calibration_poly) / 
+  #       poly.counts(domcv9, calibration_poly)
+  #fr[fr >= 1] <- 1
+
+  # predicted failure ratios
+  frp <- town_dry / (town_dry + town_wet)
+  
+########################################################################  
+
+# bind observed and predicted failure ratios to calibration townships
+calibration_poly@data$fr  <- fr
+calibration_poly@data$frp <- frp
+
+#spplot(calibration_poly, c("fr","frp"))
+
+# plot observed v predicted per township
+data.frame(township = names(fr), fr = fr, frp = frp) %>% 
+  ggplot(aes(fr, frp)) +
+  geom_point() +
+  geom_text(aes(label = township), nudge_y = -0.035, nudge_x = -0.01) +
+  coord_cartesian(xlim = c(0,1), ylim = c(0,1)) +
+  geom_abline(y=1, linetype = "dashed") +
+  labs(title = "Calibrated Well Failure Proportions at Townships",
+       subtitle = "Townships with reports >= 60",
+       x = "Actual Failure", y = "Predicted Failure") +
+  theme_minimal() -> p_obj
+
+p_obj
+
+#ggsave(p_obj, filename = "p_obj.png", dpi = 300, height = 8, width = 8)
+```
+
+<!-- And lastly, we visualize the objective function space to ensure we're not missing other minima in the optimization, or stuck in a local minima. -->
+<!-- ```{r, eval = FALSE} -->
+<!-- # visualize objective function space -->
+<!-- obj_mat <- matrix(NA, nrow=25, ncol=25)  -->
+<!-- ii <- seq(.01,.99,.04) -->
+<!-- jj <- seq(25, 49, 1) -->
+<!-- for(i in 1:25){ -->
+<!--   for(j in 1:25){  -->
+<!--     temp <- optim(c(ii[i],jj[j]), fn = fun)  -->
+<!--     obj_mat[i, j] = temp$value[1]   -->
+<!--   }  -->
+<!-- }  -->
+
+<!-- write_rds(obj_mat, "obj_mat.rds") -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- obj_mat <- read_rds("obj_mat.rds") -->
+
+<!-- obj_mat <- obj_mat[1:25,1:25] -->
+
+<!-- raster(obj_mat) %>% plot() -->
+
+<!-- raster(obj_mat) %>%  -->
+<!--   as.data.frame(xy = TRUE) %>%  -->
+<!--   mutate(x = rep(ii, 25), y = rep(rev(jj), each=25)) %>%  -->
+<!--   ggplot(aes(x, y)) + -->
+<!--   geom_raster(aes(x,y, fill = layer)) + -->
+<!--   scale_fill_viridis_c() -->
+<!-- ``` -->
+
+## Apply the Calibrated Model
+
+Apply the calibrated parameters to the rest of the dataset, and compute well failure at the Township, GSA, and Bulletin 118 subbasin level.
+```{r}
+opt_dist <- opt$par[1] # calibrated separation distance
+opt_age  <- opt$par[2] # calibrated retirement age
+ry <- 2017 - opt_age   # retirement year
+domcv10 <- domcv6      # copy of the data
+
+
+# subset for active wells
+domcv10 <- domcv10[which(domcv10@data$year >= ry), ] 
+  
+# water column heights
+# negative water column heights do not affect optimization
+# these are just wells that are very far gone
+wch <- domcv10@data$bot - domcv10@data$Ensemble
+  
+# pump separation distance (ft) from top of water column
+ps <- opt_dist * wch
+  
+# pump location (ft below land surface)
+pl <- domcv9@data$Ensemble + ps
+  
+# put into dataframe and compute well failures
+domcv10@data <- domcv10@data %>% 
+  mutate(pl = pl,
+         dry = ifelse(max_gw >= pl, TRUE, FALSE))
+
+# # count dry and wet wells in townships
+# blm_dry <- over(domcv10[domcv10@data$dry == T, ], blmcv) %>% count(PLSSID)
+# blm_wet <- over(domcv10[domcv10@data$dry == F, ], blmcv) %>% count(PLSSID)
+# blm_frp <- left_join(blm_wet, blm_dry, by = "PLSSID") %>% 
+#   mutate(total = n.x + n.y,  # total count of wells 
+#          frp = (n.y / total) * 100,  # calc failure ratios
+#          fc = paste0("(", n.y, "/", total," = ", round(frp, 2), "%)"),
+#          fc = str_replace_all(fc, "(NA/NA = NA%)", "NA"))
+# 
+# blmcv@data <- left_join(blmcv@data, blm_frp, by = "PLSSID")
+# 
+# # count dry and wet wells in GSAs
+# gsa_dry <- over(domcv10[domcv10@data$dry == T, ], gsacv) %>% count(GSA.Name)
+# gsa_wet <- over(domcv10[domcv10@data$dry == F, ], gsacv) %>% count(GSA.Name)
+# gsa_frp <- left_join(gsa_wet, gsa_dry, by = "GSA.Name") %>% 
+#   mutate(total = n.x + n.y,  # total count of wells 
+#          frp = (n.y / total) * 100,  # calc failure ratios
+#          fc = paste0("(", n.y, "/", total," = ", round(frp, 2), "%)"),
+#          fc = str_replace_all(fc, "(NA/NA = NA%)", "NA"))
+# 
+# gsacv@data <- left_join(gsacv@data, gsa_frp, by = "GSA.Name")
+# 
+# # count dry and wet wells in b118 
+# b118_dry <- over(domcv10[domcv10@data$dry == T, ], b118cv) %>% count(Basin_Subb)
+# b118_wet <- over(domcv10[domcv10@data$dry == F, ], b118cv) %>% count(Basin_Subb)
+# b118_frp <- left_join(b118_wet, b118_dry, by = "Basin_Subb") %>% 
+#   mutate(total = n.x + n.y,  # total count of wells 
+#          frp = (n.y / total) * 100,  # calc failure ratios
+#          fc = paste0("(", n.y, "/", total," = ", round(frp, 2), "%)"),
+#          fc = str_replace_all(fc, "(NA/NA = NA%)", "NA"))
+# 
+# b118cv@data <- left_join(b118cv@data, b118_frp, by = "Basin_Subb")
+
+# GSAs
+gsa_dry <- poly.counts(domcv10[domcv10$dry == T, ], gsacv)
+gsa_wet <- poly.counts(domcv10[domcv10$dry == F, ], gsacv)
+gsa_frp <- gsa_dry / (gsa_dry + gsa_wet)
+
+gsacv@data$frp <- gsa_frp * 100
+gsacv@data$fc <- paste0("(",gsa_dry,"/",(gsa_dry+gsa_wet)," = ",round(gsa_frp*100,2),"%)")
+gsacv@data$dry <- gsa_dry
+
+# B118 
+b118_dry <- poly.counts(domcv10[domcv10$dry == T, ], b118cv)
+b118_wet <- poly.counts(domcv10[domcv10$dry == F, ], b118cv)
+b118_frp <- b118_dry / (b118_dry + b118_wet)
+
+b118cv@data$frp <- b118_frp * 100
+b118cv@data$fc <- paste0("(",b118_dry,"/",(b118_dry+b118_wet)," = ",round(b118_frp*100,2),"%)")
+b118cv@data$dry <- b118_dry
+
+# Township
+blm_dry <- poly.counts(domcv10[domcv10$dry == T, ], blmcv)
+blm_wet <- poly.counts(domcv10[domcv10$dry == F, ], blmcv)
+blm_frp <- blm_dry / (blm_dry + blm_wet)
+
+blmcv@data$frp <- blm_frp * 100
+blmcv@data$fc <- paste0("(",blm_dry,"/",(blm_dry+blm_wet)," = ",round(blm_frp*100,2),"%)")
+blmcv@data$dry <- blm_dry
+```
+
+***  
+
+# Results
+
+### Static Maps
+
+Predictions of domestic well failure for the 2012-2016 drought over different areal units.
+
+```{r}
+library(sf)
+library(ggplot2)
+
+# convert to sf
+blmcvsf  <- st_as_sf(blmcv)
+gsacvsf  <- st_as_sf(gsacv)
+b118cvsf <- st_as_sf(b118cv)
+cvsf     <- st_as_sf(cv)
+
+# plot townships
+p1 <- ggplot() +
+  geom_sf(data = blmcvsf, aes(fill = log(dry))) +
+  geom_sf(data = cvsf, alpha = 0.01, lwd = .8, color = "red") +
+  scale_fill_viridis_c("% Failure") +
+  coord_sf(crs = st_crs(102003)) +
+  labs(#title    = "2012-2016 Domestic Well Failures",
+       #subtitle = "Townships",
+       y = "Latitude", x = "Longitude") +
+  theme_bw()
+
+# plot GSAs
+p2 <- ggplot() +
+  geom_sf(data = gsacvsf, aes(fill = dry)) +
+  geom_sf(data = cvsf, alpha = 0.01, lwd = .8, color = "red") +
+  scale_fill_viridis_c("% Failure") +
+  coord_sf(crs = st_crs(102003)) +
+  labs(#title    = "2012-2016 Domestic Well Failures",
+       #subtitle = "Groundwater Sustainability Agencies",
+       y = "Latitude", x = "Longitude") +
+  theme_bw()
+
+# plot Bulltein 118 subbasins
+p3 <- ggplot() +
+  geom_sf(data = b118cvsf, aes(fill = dry)) +
+  geom_sf(data = cvsf, alpha = 0.01, lwd = .8, color = "red") +
+  scale_fill_viridis_c("% Failure") +
+  coord_sf(crs = st_crs(102003)) +
+  labs(#title    = "2012-2016 Domestic Well Failures",
+       #subtitle = "Bulletin 118 Subbasins",
+       y = "Latitude", x = "Longitude") +
+  theme_bw()
+
+# save
+# ggsave(p1, file = "p_blm.png", dpi = 300, height = 10, width = 7)
+# ggsave(p2, file = "p_gsa.png", dpi = 300, height = 10, width = 7)
+# ggsave(p3, file = "p_118.png", dpi = 300, height = 10, width = 7)
+
+```
+
+#### Township
+```{r}
+p1 
+```
+
+***  
+
+#### Groundwater Sustainability Agency
+```{r}
+p2
+```
+
+***  
+
+#### Bulletin 118 Subbasin
+```{r}
+p3
+```
+
+
+***  
+
+### Interactive Maps
+
+Predictions for the 2012-2016 drought.
+
+```{r}
+library(leaflet)
+library(colormap)
+
+# transform polygons to lat/lon for leaflet
+b118cvsf <- b118cvsf %>% st_transform(crs = "+init=epsg:4326") 
+gsacvsf  <- gsacvsf  %>% st_transform(crs = "+init=epsg:4326") 
+blmcvsf  <- blmcvsf  %>% st_transform(crs = "+init=epsg:4326") 
+
+# transform points to ll for leaflet
+domcv10ll <- spTransform(domcv10, crs("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0") )
+
+# round well bottom measurements
+domcv10ll$bot <- round(domcv10ll$bot, 2)
+
+# icons for points
+icons <- icons(
+  
+)
+
+# function to get colors
+getColor <- function(d) {
+  sapply(d$dry, function(dry) {
+    ifelse(dry == TRUE, "red", "blue") # red if fail, blue if not
+  })
+}
+
+# make marker list
+icons <- awesomeIcons(
+  icon = 'f041',
+  iconColor = 'black',
+  library = 'fa',
+  markerColor = getColor(domcv10ll@data)
+)
+
+
+```
+
+
+#### Township
+```{r}
+pal <- colorBin(palette = colormap(colormaps$viridis, nshades = 10),
+                domain = blmcvsf$frp, bins = seq(0,100,10))
+
+lng <- mean(blmcv@bbox[1, ])
+lat <- mean(blmcv@bbox[2, ])
+
+blmcvsf %>% 
+  # only show townships with 30 or more wells to begin with
+  #mutate(frp = ifelse(nwells >= 30, frp, NA)) %>% 
+  leaflet(width = "100%") %>% 
+  addProviderTiles(provider = "CartoDB.Positron") %>%
+  addPolygons(label = ~ paste(TWNSHPLAB, fc),
+              color = ~ pal(frp),
+              stroke = FALSE,
+              fillOpacity = 0.7) %>% 
+  addPolygons(label = ~ paste(TWNSHPLAB, fc),
+              color = ~ pal(frp),
+              stroke = FALSE,
+              fillOpacity = 0.7)
+  addLegend("bottomright", 
+            pal = pal, 
+            values = ~ frp,
+            title = "% Failure",
+            opacity = 1,
+            labFormat = function(type, cuts, p) {
+              n = length(cuts)
+              paste0(cuts[-n], " &ndash; ", cuts[-1])
+            }
+            )
+
+```
+
+***  
+
+#### Groundwater Sustainability Agency
+```{r}
+pal <- colorBin(palette = colormap(colormaps$viridis, nshades = 10),
+                domain = gsacvsf$frp, bins = seq(0,100,10))
+
+gsacvsf %>% 
+  leaflet(width = "100%") %>% 
+  addProviderTiles(provider = "CartoDB.Positron") %>%
+  addPolygons(label = ~ paste(as.character(GSA.Name), fc),
+              color = ~ pal(frp),
+              stroke = FALSE,
+              fillOpacity = 0.7,
+              group = "GSAs") %>% 
+  addAwesomeMarkers(lng = domcv10ll@coords[, 1],
+             lat = domcv10ll@coords[, 2],
+             popup = paste("Well ID:", domcv10ll$WCRNumber,"<br>",
+                           "(", domcv10ll$lon, "N", domcv10ll$lat, "W)", "<br>",
+                           "Bottom of Perforated Interval:", domcv10ll$bot, "ft.", "<br>",
+                           "Dry:", domcv10ll$dry),
+             icon = icons,
+             group = "Wells",
+             clusterOptions = markerClusterOptions()) %>%
+  addLayersControl(overlayGroups = c("GSAs", "Wells"), 
+                   position = "topleft") %>%
+  hideGroup("Wells") %>%
+  addLegend("bottomright", 
+            pal = pal, 
+            values = ~ frp,
+            title = "% Failure",
+            opacity = 1,
+            labFormat = function(type, cuts, p) {
+              n = length(cuts)
+              paste0(cuts[-n], " &ndash; ", cuts[-1])
+            }
+            )
+```
+
+***  
+
+#### Bulletin 118 Subbasin
+```{r}
+pal <- colorBin(palette = colormap(colormaps$viridis, nshades = 10),
+                domain = b118cvsf$frp, bins = seq(0,100,10))
+
+b118cvsf %>% 
+  leaflet(width = "100%") %>% 
+  addProviderTiles(provider = "CartoDB.Positron") %>%
+  addPolygons(label = ~ paste(as.character(Subbasin_N), fc),
+              color = ~ pal(frp),
+              stroke = FALSE,
+              fillOpacity = 0.7) %>% 
+  addLegend("bottomright", 
+            pal = pal, 
+            values = ~ frp,
+            title = "% Failure",
+            opacity = 1,
+            labFormat = function(type, cuts, p) {
+              n = length(cuts)
+              paste0(cuts[-n], " &ndash; ", cuts[-1])
+            }
+            )
+
+```
+

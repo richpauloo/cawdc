@@ -1,0 +1,238 @@
+---
+title: "Domestic Well Failure Model Calibration 2"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+    highlight: "pygments"
+date: 2018-07-03
+author: Rich Pauloo
+---
+
+The purpose of this script is to generate a distribution of domestic well retirement ages from the OSWCR database and with the help of bootstrapping.
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message    = FALSE,
+  error      = FALSE,
+  warning    = FALSE,
+  cache      = TRUE
+)
+```
+
+
+`dat.rds` was generated from `publish_3.Rmd`. The only difference between it and `clean_dat`, is that it represents all domestic wells throughout the state, and there is no culling because of lack of latitude/longitude data (around 2% of total data).  
+
+```{r}
+library(tidyverse)
+library(sp)
+
+dat <- read_rds("dat.rds")
+```
+
+
+# Entire State of California
+
+Find duplicate domestic wells, and calculate a distribution of retirement ages.
+```{r}
+# all legacy log numbers
+l <- dat %>% filter(type == "unused"& !is.na(LegacyLogNumber)) %>% pull(LegacyLogNumber)
+
+# all legacy log numbers with two entries
+two_entries <- dat %>% 
+  filter(LegacyLogNumber %in% l & 
+         !is.na(LegacyLogNumber) &
+         !is.na(DateWorkEnded)) %>% 
+  count(LegacyLogNumber) %>% 
+  arrange(desc(n)) %>% 
+  filter(n >= 2) %>% 
+  pull(LegacyLogNumber)
+
+# another filter
+tef <- dat %>% 
+  filter(LegacyLogNumber %in% two_entries) %>% 
+  dplyr::select(LegacyLogNumber, DateWorkEnded, type) %>% 
+  filter(type %in% c("domestic", "unused")) %>% 
+  count(LegacyLogNumber) %>%
+  filter(n >= 2) %>% 
+  pull(LegacyLogNumber)
+
+# 
+d2 <- dat %>% 
+  filter(LegacyLogNumber %in% tef & !is.na(DateWorkEnded)) %>% 
+  dplyr::select(LegacyLogNumber, DateWorkEnded, type) %>% 
+  arrange(LegacyLogNumber) %>% 
+  tidyr::separate(DateWorkEnded, into = c("month","day","year")) %>% 
+  mutate(year = as.numeric(year)) %>% 
+  dplyr::select(LegacyLogNumber, year, type) 
+  
+# split into list
+dl <- base::split(d2, f = d2$LegacyLogNumber)
+
+# function to get retirement age
+get_ra <- function(x){
+  y1 = min(x$year)
+  y2 = max(x$year)
+  return(abs(y1-y2))
+}
+
+# retirement age distribution
+rad <- sapply(dl, get_ra)
+
+```
+
+
+```{r}
+# remove impossible values
+rad <- rad[rad >=1 ]
+
+# bootstrap with replacement
+sample(rad, size = 50000, replace = T) %>% hist()
+
+# fit lognormal dist to data
+library(fitdistrplus)
+
+lnd <- fitdistrplus::fitdist(rad, # to water_above_bot values
+                             distr = "lnorm",    # lognormal distribution
+                             method = "mle")     # use maximum liklihood
+
+plot(lnd)
+
+m <- lnd$estimate[1] # mean
+v <- (lnd$estimate[2])^2 # variance
+
+# calculate the mean of the lognormal dist
+mu <- exp(m + .5*(v))
+
+# extract fitted `density` values given the paramaters from the fit 
+dlnd <- dlnorm(seq(1,70,.1), coef(lnd)[1], coef(lnd)[2])
+  
+# bind the paramaaters in a dataframe
+dlnd <- data.frame(x = seq(1,70,.1), d = dlnd)
+  
+# plot
+dom_ret_age <- data.frame(rad=rad) %>% 
+  ggplot() +
+  geom_histogram(aes(x = rad, y = ..density..), binwidth = 3, color = "white") + 
+  geom_line(data = dlnd, aes(x, d), color = "red", lwd = 1) +
+  geom_vline(xintercept = mu, linetype = "dashed", lwd = 1) + 
+  geom_text(aes(19, 0.06, label = "mean = 16")) + 
+  theme_minimal() +
+  labs(x = "Age (years)", y = "Probability Density",
+       title = "Domestic Well Retirement Age in California", 
+       subtitle = "(nwells = 188)")
+
+dom_ret_age
+write_rds(dom_ret_age, "dom_ret_age.rds")
+```
+
+***  
+
+# Central Valley
+
+Same, but for `dat2df`
+```{r}
+# find data in cv
+cv <- read_rds("cv.rds")
+
+dat2 <- dat %>% filter(!is.na(lon) & !is.na(lat))
+
+pts <- cbind(dat2$lon, dat2$lat)
+
+dat2sp <- SpatialPointsDataFrame(pts, 
+                                 data = dat2, 
+                                 proj4string = 
+                                   crs("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")) 
+
+cvll <- spTransform(cv, crs("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+
+# crop dat2sp to cv
+dat2c <- dat2sp[cvll, ]
+
+# get just data
+dat2df <- dat2c@data
+
+
+#################################
+
+# all legacy log numbers
+l <- dat2df %>% filter(type == "unused"& !is.na(LegacyLogNumber)) %>% pull(LegacyLogNumber)
+
+# all legacy log numbers with two entries
+two_entries <- dat2df %>% 
+  filter(LegacyLogNumber %in% l & 
+         !is.na(LegacyLogNumber) &
+         !is.na(DateWorkEnded)) %>% 
+  count(LegacyLogNumber) %>% 
+  arrange(desc(n)) %>% 
+  filter(n >= 2) %>% 
+  pull(LegacyLogNumber)
+
+# another filter
+tef <- dat2df %>% 
+  filter(LegacyLogNumber %in% two_entries) %>% 
+  select(LegacyLogNumber, DateWorkEnded, type) %>% 
+  filter(type %in% c("domestic", "unused")) %>% 
+  count(LegacyLogNumber) %>%
+  filter(n >= 2) %>% 
+  pull(LegacyLogNumber)
+
+# 
+d2 <- dat2df %>% 
+  filter(LegacyLogNumber %in% tef & !is.na(DateWorkEnded)) %>% 
+  select(LegacyLogNumber, DateWorkEnded, type) %>% 
+  arrange(LegacyLogNumber) %>% 
+  tidyr::separate(DateWorkEnded, into = c("month","day","year")) %>% 
+  mutate(year = as.numeric(year)) %>% 
+  select(LegacyLogNumber, year, type) 
+  
+# split into list
+dl <- base::split(d2, f = d2$LegacyLogNumber)
+
+# function to get retirement age
+get_ra <- function(x){
+  y1 = min(x$year)
+  y2 = max(x$year)
+  return(abs(y1-y2))
+}
+
+# retirement age distribution
+rad <- sapply(dl, get_ra)
+
+```
+
+
+```{r}
+# remove impossible values
+rad <- rad[rad >=1 ]
+
+# bootstrap with replacement
+sample(rad, size = 10000, replace = T) %>% hist()
+
+
+# fit lognormal dist to data
+library(fitdistrplus)
+
+lnd <- fitdistrplus::fitdist(rad, # to water_above_bot values
+                             distr = "lnorm",    # lognormal distribution
+                             method = "mle")     # use maximum liklihood
+
+plot(lnd)
+
+m <- lnd$estimate[1] # mean
+v <- (lnd$estimate[2])^2 # variance
+
+# calculate the mean
+exp(m + .5*(v))
+```
+
+
+
+
+

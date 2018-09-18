@@ -1,0 +1,533 @@
+---
+title: "Spatially Varying `d`"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    toc_depth: 2
+    code_folding: hide
+    highlight: "pygments"
+date: 2018-08-01
+author: Rich Pauloo
+---
+
+One reason why the model might systematically underpredict well failure is that the tuning parameter $d$, which is essentially the ratio between pump location and well depth, might vary spatially.  
+
+If this is the case, it may be possible to eliminate $d$ from the model by **quantifying it**. For example, if we had a distribution of $d$ for every Bulletin 118 subbasin, we could take the mean of each distribution as that subbasin's $d$, and re-run the model with the $water scaling factor$ as the single parameter to optimize.  
+
+This script aims to:  
+
+1. Create the file needed to sample the well completion reports for well depth.  
+2. Outside, within Excel, go through 2 subbasins with very different hydrogeology.  
+3. Within the script once more, calculate distributions of $d$ and compare the means.  
+
+If there are demonstrated differences between two basins of interest, we are justified in repeating this process for all subbasins to refine the data used in the model.  
+
+
+# Code
+
+Load:  
+
+* domestic wells in the CV and join to...  
+* WCRLinks and join to...  
+* b118 subbains  
+
+
+```{r}
+# packages
+library(raster)
+library(tidyverse)
+library(sp)
+library(sf)
+library(readr)
+library(here)
+
+# data
+domcv5ll <- read_rds(here("code","amanda_domestic.rds"))
+coords <- c(domcv5ll[ , 16], domcv5ll[ , 15])
+dspdf <- SpatialPointsDataFrame(coords = coords, 
+                       data = domcv5ll,
+                       proj4string = crs("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+
+b118cv <- read_rds("b118cv.rds")
+wcrlinks <- read_csv(here("data","oswcr","WCRLinks_201801.csv"))
+```
+
+# Old Analysis - Skip
+
+<!-- Perform the joins. -->
+<!-- ```{r} -->
+<!-- # join domestic well points to the wcrlinks -->
+<!-- dspdf@data <- left_join(dspdf@data, wcrlinks, by = "WCRNumber") %>%  -->
+<!--   distinct(WCRNumber, .keep_all = TRUE) %>%  -->
+<!--   dplyr::select(WCRNumber, bot, WCRLink) -->
+
+<!-- # remove data without links -->
+<!-- dspdf_complete <- dspdf[!is.na(dspdf@data$WCRLink) &  -->
+<!--                            !is.na(dspdf@data$bot), ] -->
+
+
+<!-- # join to b118 polygons with st_join. make necessary transformations -->
+<!-- dspdf_merc_complete <- spTransform(dspdf_complete, crs(b118cv)) -->
+<!-- temp  <- st_as_sf(dspdf_merc_complete) -->
+<!-- temp2 <- st_as_sf(b118cv) -->
+<!-- final <- st_join(temp, temp2) -->
+<!-- final_cv <- final %>% filter(!is.na(Subbasin_N)) -->
+<!-- ``` -->
+
+<!-- Take at least 100 samples from each Subbasin. If there are less than 100 samples, take all samples. -->
+<!-- ```{r} -->
+<!-- set.seed(3897623105) -->
+
+<!-- # vectors of basins with >= 100 samples and < 100 samples -->
+<!-- gt <- final_cv %>% count(Subbasin_N) %>% filter(n >= 100) %>% pull(Subbasin_N) -->
+<!-- lt <- final_cv %>% count(Subbasin_N) %>% filter(n < 100) %>% pull(Subbasin_N) -->
+
+<!-- # regions wtih less than 100 samples -->
+<!-- ltr <- final_cv %>% filter(Subbasin_N %in% lt) -->
+
+<!-- # regions with more than 100 samples -->
+<!-- gtr <- final_cv %>% -->
+<!--   filter(Subbasin_N %in% gt) %>%  -->
+<!--   group_by(Subbasin_N) %>%  -->
+<!--   sample_n(100)  -->
+
+<!-- # bind -->
+<!-- sample_wells <- rbind(ltr, gtr) -->
+
+<!-- # save and export file with hyperlinks -->
+<!-- library(xlsx) -->
+<!-- data.frame(sample_wells) %>%  -->
+<!--   mutate(pump_depth = NA) %>% -->
+<!--   select(WCRNumber, bot, Basin_ID, Basin_Subb, Basin_Name, Subbasin_N, geometry, WCRLink, pump_depth) %>%  -->
+<!--   arrange(Subbasin_N) %>%  -->
+<!--   write_csv(here("data","quantify_pump_depth","quantify_pump_depth.csv")) -->
+<!-- ``` -->
+
+<!-- Can we avoid this analysis? Can we infer well pump location from existing tabulated data?   -->
+<!-- ```{r} -->
+<!-- # srate from scratch -->
+<!-- dspdf <- SpatialPointsDataFrame(coords = coords,  -->
+<!--                        data = domcv5ll, -->
+<!--                        proj4string = crs("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")) -->
+
+<!-- # join domestic well points to the wcrlinks -->
+<!-- dspdf@data <- left_join(dspdf@data, wcrlinks, by = "WCRNumber") %>%  -->
+<!--   distinct(WCRNumber, .keep_all = TRUE)  -->
+
+<!-- # remove data without links -->
+<!-- dspdf_complete <- dspdf[!is.na(dspdf@data$bot), ] -->
+
+
+<!-- # join to b118 polygons with st_join. make necessary transformations -->
+<!-- dspdf_merc_complete <- spTransform(dspdf_complete, crs(b118cv)) -->
+<!-- temp  <- st_as_sf(dspdf_merc_complete) -->
+<!-- temp2 <- st_as_sf(b118cv) -->
+<!-- final <- st_join(temp, temp2) -->
+<!-- final_cv <- final %>% filter(!is.na(Subbasin_N)) -->
+<!-- ``` -->
+
+<!-- Say the pump location is halway between the top and bottom of the screened interval. Most well reports don't explicitly say how deep the pump was anyway, they instead kgive the interval of the screen.   -->
+<!-- ```{r} -->
+<!-- # calculate the middle of the screened interval (pump_loc), and  -->
+<!-- # ratio of pump depth to well depth (d) -->
+<!-- test <- final_cv %>%  -->
+<!--   filter(!is.na(top) & !is.na(bot) & top > 0 & bot > 0) %>%  -->
+<!--   filter(bot > top) %>% # can't have top > bot -->
+<!--   dplyr::select(Subbasin_N, top, bot) %>%  -->
+<!--   mutate(pump_loc = (top+bot)/2, -->
+<!--          d = pump_loc / bot) -->
+
+<!-- # mean `d` per subbasin -->
+<!-- test %>%  -->
+<!--   group_by(Subbasin_N) %>%  -->
+<!--   summarise(mean_d = base::mean(d)) %>%  -->
+<!--   ggplot() + -->
+<!--   geom_histogram(aes(mean_d), binwidth = 0.02) -->
+
+
+<!-- test %>%  -->
+<!--   group_by(Subbasin_N) %>%  -->
+<!--   mutate(mean_d = mean(d)) %>%  -->
+<!--   ggplot() + -->
+<!--   geom_density(aes(d), alpha = 0.1, fill="grey50", color="grey50") + -->
+<!--   facet_wrap(~Subbasin_N) +  -->
+<!--   geom_vline(aes(xintercept = mean_d), color = "red") + -->
+<!--   geom_text(aes(x = mean_d, y = 15, label = round(mean_d,2)), hjust = 1) + -->
+<!--   theme_minimal() + -->
+<!--   labs(title = "Density of Tuning Parameter d", -->
+<!--        subtitle = "Pump depth infered as mean of top and bottom of screened interval") -> p -->
+
+
+<!-- ggsave(p, filename="tuning_aram_d.png", dpi = 300, height = 7, width = 11) -->
+<!-- ``` -->
+
+
+# New Analysis - Start Here
+
+* Learning moment from Graham:  
+
+> I will take a look at this later, but unless they're screwing up, they would put the pump above the screened interval, not in it.  
+
+* so maybe I should calculate pump location as **between the static water level and the top of the screened interval**.  
+* Graham thinks this makes more sense.  
+```{r}
+# join domestic well points to the wcrlinks
+dspdf@data <- left_join(dspdf@data, wcrlinks, by = "WCRNumber") %>% 
+  distinct(WCRNumber, .keep_all = TRUE) 
+
+
+# join to b118 polygons with st_join. make necessary transformations
+dspdf_merc <- spTransform(dspdf, crs(b118cv))
+temp  <- st_as_sf(dspdf_merc)
+temp2 <- st_as_sf(b118cv)
+final <- st_join(temp, temp2)
+final_cv <- final %>% filter(!is.na(Subbasin_N))
+
+# calculate the pump_loc as mean of static water level and top of screen
+# ratio of pump depth to well depth (d)
+test <- final_cv %>% 
+  filter(!is.na(top) & !is.na(bot) & !is.na(StaticWaterLevel) &
+         top > 0 & bot > 0 & StaticWaterLevel > 0) %>% 
+  filter(bot > top & StaticWaterLevel < top) %>% # can't have top > bot or swl > top
+  dplyr::select(WCRNumber, Subbasin_N, top, bot, StaticWaterLevel) %>% 
+  mutate(pump_loc = (top+StaticWaterLevel)/2,
+         d = pump_loc / bot)
+
+p1 <- test %>% 
+  ggplot() + 
+  geom_histogram(aes(pump_loc)) 
+
+p2 <- test %>% 
+  ggplot() + 
+  geom_histogram(aes(StaticWaterLevel)) 
+
+p3 <- test %>% 
+  ggplot() + 
+  geom_histogram(aes(top)) 
+
+p4 <- test %>% 
+  ggplot() + 
+  geom_histogram(aes(bot)) 
+
+cowplot::plot_grid(p1,p2,p3,p4)
+
+
+
+p_tuning_param <- test %>%
+  group_by(Subbasin_N) %>% 
+  mutate(mean_d = mean(pump_loc), 
+         n = n()) %>% 
+  filter(n >= 10) %>% 
+  ggplot() +
+  geom_density(aes(pump_loc), alpha = 0.1, fill="grey50", color="grey50") +
+  facet_wrap(~Subbasin_N) + 
+  geom_vline(aes(xintercept = mean_d), color = "red") +
+  geom_text(aes(x = mean_d + 50, y = .012, 
+                label = paste0("mean=",round(mean_d,2)))) +
+  geom_text(aes(x = mean_d + 50, y = .015, 
+                label = paste0("n=",n))) +
+  theme_minimal() +
+  coord_cartesian(xlim = c(0,600)) +
+  labs(title = "Density of Pump Location", y= "Density",
+       subtitle = "Pump depth infered as mean of Static Water Level and Top of Well Screen")
+
+ggsave(p_tuning_param, filename="pump_loc_density.png", dpi = 300, height = 7, width = 11)
+
+# mean pump_loc per subbasin
+test %>% 
+  group_by(Subbasin_N) %>% 
+  mutate(n = n()) %>% 
+  filter(n >= 10) %>% 
+  summarise(mean_d = mean(pump_loc)) %>% 
+  ggplot() +
+  geom_histogram(aes(mean_d)) +
+  theme_minimal()
+```
+
+## Relationships between pump location and bottom of well.
+
+```{r}
+# visualize
+p_pump_loc_bot <- test %>% 
+  group_by(Subbasin_N) %>% 
+  mutate(n = n()) %>% 
+  filter(n >= 50) %>% 
+  ungroup() %>% 
+  ggplot(aes(log(pump_loc), log(bot))) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.99) +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_smooth(method = "lm", level = 0.65) +
+  facet_wrap(~Subbasin_N) +
+  theme_minimal() +
+  labs(title = "Spatial Dependency of Pump Location",
+       subtitle = "B118 Basins with n >= 50",
+       y = "log(pump location)", x = "log(screen bottom)")
+
+p_pump_loc_bot
+
+ggplot2::ggsave(p_pump_loc_bot, filename = "p_pump_loc_bot.png", dpi = 300, height = 7, width = 11)
+
+# export lm coefficients
+lms <- test %>% 
+  group_by(Subbasin_N) %>% 
+  mutate(n = n()) %>% 
+  filter(n >= 50) %>% 
+  base::split(.$Subbasin_N) %>% 
+  lapply(., function(x){return(summary(lm(log(pump_loc) ~ log(bot), data = x)))}) 
+
+# log-log linear model between bottom (which we have for most all wells) and pump_location!
+pl_lm <- data.frame(Subbasin_N = names(lms),
+                  b0 = lapply(lms, function(x){return(coef(x)[1])}) %>% do.call(rbind, .),
+                  b1 = lapply(lms, function(x){return(coef(x)[2])}) %>% do.call(rbind, .))
+
+rownames(pl_lm) <- NULL
+write_rds(pl_lm, "pl_lm.rds") # export
+```
+
+`pl_lm` doesn't have all subbasins in it. Most of the northern regions lack data, as do two in the south.
+```{r}
+# visualize where we have data
+hold <- test %>%
+  group_by(Subbasin_N) %>% 
+  mutate(mean_d = mean(d), 
+         n = n()) %>% 
+  filter(n >= 50) %>% count(n) %>% arrange(n) %>% 
+  pull(Subbasin_N)
+
+hold
+
+b118cv[b118cv$Subbasin_N %in% hold, ] %>% plot()
+```
+
+For subbasins with **missing** data, create a north-south model to impute their pump_location.
+```{r}
+# make north and south log-log lm for missing basins
+# basins that have linear models already
+with_beta <- test %>% 
+  group_by(Subbasin_N) %>% 
+  mutate(n = n()) %>% 
+  filter(n >= 50) %>% pull(Subbasin_N) %>% unique()
+# basins without a lm
+no_beta <- unique(b118cv$Subbasin_N)[!unique(b118cv$Subbasin_N) %in% with_beta]
+no_beta_north <- no_beta[-c(1,2)] # north
+no_beta_south  <- no_beta[c(1,2)]  # south
+# north and south basins to model after
+with_beta_north <- c("COSUMNES","NORTH AMERICAN","COLUSA","YOLO","SOLANO")
+with_beta_south <- c("DELTA-MENDOTA","CHOWCHILLA","TULARE LAKE")
+
+# visualize
+north_south_model <- test %>% 
+  mutate(north_south = ifelse(Subbasin_N %in% with_beta_north, "North", NA),
+         north_south = ifelse(Subbasin_N %in% with_beta_south, "South", north_south)) %>% 
+  filter(!is.na(north_south))
+
+p_north_south_model <- north_south_model %>% 
+  ggplot(aes(log(pump_loc), log(bot))) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(~north_south) +
+  theme_minimal() +
+  labs(title = "Spatial Dependency of Pump Location",
+       subtitle = "North & South Models for Imputing Pump Location",
+       y = "log(pump location)", x = "log(screen bottom)")
+
+p_north_south_model
+
+ggplot2::ggsave(p_north_south_model, 
+                filename = "p_north_south_model.png", 
+                dpi = 300, height = 7, width = 11)
+
+# create and export linear models
+# export lm coefficients
+ns_lms <- north_south_model %>% 
+  base::split(.$north_south) %>% 
+  lapply(., function(x){return(summary(lm(log(pump_loc) ~ log(bot), data = x)))}) 
+
+ns_lm <- data.frame(region = names(ns_lms),
+                    b0 = lapply(ns_lms, function(x){return(coef(x)[1])}) %>% do.call(rbind, .),
+                    b1 = lapply(ns_lms, function(x){return(coef(x)[2])}) %>% do.call(rbind, .))
+
+rownames(ns_lm) <- NULL
+write_rds(ns_lm, "ns_lm.rds")
+```
+
+
+Let's now apply the lm coefficients to `bot` for locations where we don't have data, and create a new `domcv6` to export to the calibration script. This is where the script can be refined with more information.
+```{r}
+# load up domcv6
+domcv6 <- read_rds("domcv6_mean_gw.rds")
+domcv6@data <- left_join(domcv6@data, test %>% dplyr::select(WCRNumber, pump_loc), by = "WCRNumber")
+
+# find what subbasins each point is in
+b118cv_t <- spTransform(b118cv, crs(domcv6)) # transform b118cv
+domcv6@data <- cbind(domcv6@data, over(domcv6, b118cv_t)) # overlay
+
+# lm info for no beta subbasins. 
+nbn <- data.frame(Subbasin_N = no_beta_north, 
+                  b0 = ns_lm[1, "b0"],
+                  b1 = ns_lm[1, "b1"])
+
+nbs <- data.frame(Subbasin_N = no_beta_south,
+                  b0 = ns_lm[2, "b0"],
+                  b1 = ns_lm[2, "b1"])
+
+# bind to lm info to dataframe for subbasins with lms
+lm_data <- rbind(nbn, nbs, pl_lm)
+
+# join to spatial data
+domcv6@data <- left_join(domcv6@data, lm_data, by = "Subbasin_N")
+
+
+# apply the linear models to fill in missing pump_loc
+domcv6@data <- domcv6@data %>% 
+  mutate(pump_loc = ifelse(!is.na(pump_loc), pump_loc,
+                           # apply lm coefficients and rexponentiate for data missing a value
+                           exp(b0 + (log(bot)*b1)))) 
+
+
+# visualize
+domcv_with_beta <- domcv6
+
+p_pump_loc_with_beta <- domcv_with_beta@data %>% 
+  ggplot() +
+  geom_density(aes(pump_loc), fill = "grey50", alpha = 0.5) +
+  facet_wrap(~Subbasin_N) +
+  theme_minimal() +
+  labs(title = "Densities of Pump Locations in B118 Subbasins",
+       subtitle = "~75% of pump locations are imputed",
+       x = "Pump Location Below Land Surface (ft.)") +
+  coord_cartesian(xlim = c(0,400)) 
+
+ggplot2::ggsave(p_pump_loc_with_beta, filename = "pump_loc_with_beta.png", dpi = 300, height = 7, width = 11)
+
+
+# export for re-running in calibration
+write_rds(domcv_with_beta, "domcv6_mean_gw_with_beta.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***  
+
+# Intern Data Mining Work
+
+Locations where we lack adequate StaticWaterLevel data.
+```{r}
+# vector of subbasins
+sbs_all <- b118cv$Subbasin_N %>% unique()
+
+# subbasins with >= 100 data points to calculate d
+sbs_good <- test %>%
+  group_by(Subbasin_N) %>% 
+  mutate(mean_d = mean(d), 
+         n = n()) %>% 
+  filter(n >= 30) %>% 
+  pull(Subbasin_N) %>% 
+  unique()
+
+# subbasins with < 100 data points
+sbs_bad <- sbs_all[!sbs_all %in% sbs_good]
+
+
+# current state of the bad data
+test2 <- test %>%
+  group_by(Subbasin_N) %>% 
+  summarise(n = n()) %>% 
+  filter(Subbasin_N %in% sbs_bad) %>% 
+  arrange(n) %>% 
+  mutate(needed = 60 - n) 
+
+test2 %>% pull(needed) %>% sum() -> n_reports_to_analyze
+
+# calculate the time needed to extract these data
+(n_reports_to_analyze * 
+  2) / # minutes per report
+  (1440) * # minutes per day
+  3 # because we only work 1/3 of the day
+```
+
+Create the dataset to extract. The data set we want to sample from $w_{sample}$ is a subset of all wells $W$. The wells we don't want to sample from $w_{complete}$ is also a subset of $W$.  
+
+$W = \{w_{sample}, w_{complete}\}$
+
+$w_{sample}$ and $w_{complete}$ are disjoint. Their intersection $w_{sample} \cap w_{complete} = \emptyset$, where $\emptyset$ is an empty set.  
+
+$w_{sample} \subseteq W$  
+
+$w_{complete} \subseteq W$  
+
+$w_{s} \nsubseteq w_{complete}$  
+
+```{r}
+set.seed(67642164)
+
+# identify the set we have sufficient info for
+w_compelte <- final_cv %>% 
+  filter(!is.na(top) & !is.na(bot) & !is.na(StaticWaterLevel) &
+         top > 0 & bot > 0 & StaticWaterLevel > 0) %>% 
+  filter(bot > top & StaticWaterLevel < top) 
+
+# the set we don't have info for
+w_sample <- final_cv %>% filter(!WCRNumber %in% w_compelte$WCRNumber)
+
+# w_sample furthermore is set of points in sbs_bad
+w_sample <- w_sample %>% filter(Subbasin_N %in% sbs_bad)
+
+
+# subset of w_sample that isn't in test_2 that we need to add to the samples
+i <- test2$Subbasin_N %>% unique()
+w_sample_add <- w_sample %>% filter(!Subbasin_N %in% i)
+# subset to yrs in study, 1962 is 50 yr retirement
+w_sample_add <- w_sample_add %>% filter(year >= 1962) 
+
+# get samples where there is overlap in Subbasin_N between w_sample and test2
+ordered_n <- test2 %>% arrange(Subbasin_N) %>% pull(needed)
+sample_list <- w_sample %>% 
+  filter(Subbasin_N %in% test2$Subbasin_N) %>% 
+  filter(year >= 1962 & year <= 2012) %>% # subset to yrs in study, 1962 is 50 yr retirement
+  left_join(data.frame(test2) %>% dplyr::select(Subbasin_N, needed)) %>% # add samples needed
+  split(.$Subbasin_N)
+
+# function to get samples
+get_samples <- function(df){
+  on <- unique(df$needed) # if the number of samples to get exceeds the number of rows to draw from, take all rows
+  if(nrow(df) < on){
+    return(df)
+  }  
+  if(nrow(df) >= on){ # otherwise, take the number of samples to get
+    return(sample_n(df, on))
+  }
+}
+
+# make final sample df
+final_sample_df <- lapply(sample_list, get_samples) %>% 
+  do.call(rbind, .) %>% # bind lists into a df
+  dplyr::select(-needed) %>%   # remove this column which we don't need anymore
+  rbind(w_sample_add)   # add the smaller subbasins
+
+
+# save and export file with hyperlinks
+library(xlsx)
+final_sample_df %>%  
+  filter(!is.na(WCRLink)) %>% 
+  dplyr::select(WCRNumber, Basin_ID, Basin_Subb, Basin_Name, Subbasin_N, geometry, WCRLink, bot, top, StaticWaterLevel) %>% 
+  arrange(Subbasin_N) %>% 
+  write_csv(here("data","quantify_pump_depth","quantify_pump_depth_targeted.csv"))
+```
+

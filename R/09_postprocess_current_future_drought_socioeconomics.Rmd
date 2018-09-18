@@ -1,0 +1,225 @@
+---
+title: "Domestic Well Failure during the 2012-2016 drought and Future Simulated Dorughts"
+author: Rich Pauloo & Amanda Fencl
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+# **INTRODUCTION**
+
+The purpose of this script is to:
+
+* take the 2012-2016 drought, and 1-4 year drought scenarios I passed to Amanda and plot both global and county level distributions of minimum distances from failed wells to their nearest water system.  
+
+* include this in the CA Water Data Challenge.  
+```{r, echo = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, error = FALSE)
+```
+
+## Exploratory Data Analysis
+```{r}
+library(readr)
+library(tidyverse)
+library(raster)
+library(sp)
+library(here)
+```
+
+Read data.
+```{r}
+# vector of shapefiles to bring into R
+f <- list.files(here("data","amanda_shp","failure_income_distance"))
+f <- f[grepl(".shp$", f)][2:6] # patterns that end in .shp
+
+l <- vector("list", length(f)) # initalize list
+for(i in 1:5){
+  l[[i]] <- shapefile(here("data",
+                           "amanda_shp",
+                           "failure_income_distance",
+                           f[i]))
+}
+```
+
+Tables of MHI per drought scenario.
+```{r}
+lapply(l, function(x){table(x@data$MHI16CAT)})
+
+# make MHI into factor
+l <- lapply(l, 
+            function(x){
+              x@data$MHI16CAT <- as.factor(x@data$MHI16CAT); 
+              levels(x@data$MHI16CAT) <- c("SDAC","DAC", "MHI+")
+              return(x)
+              }
+            )
+```
+
+Plots of distirbution of distances per group for 2012-2016 drought.
+```{r}
+p1 <- l[[1]]@data %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), y = near_MI)) +
+  facet_wrap(~County) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Distance from Domestic Well Failures to Closest Water System",
+       subtitle = "2012-2016 drought: County-Level Response",
+       y = "Distance (miles)", x = "Income Level")
+
+p1b <- l[[1]]@data %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), y = near_MI,
+                   fill = MHI16CAT), alpha = 0.5) +
+  coord_flip(ylim = c(0,10)) +
+  scale_y_continuous(breaks = c(0,5,10)) +
+  theme_bw() +
+  labs(title = "Distance from Domestic Well Failures to Closest Water System",
+       subtitle = "2012-2016 drought: County-Level Response",
+       y = "Distance (miles)", x = "Income Level") +
+  scale_fill_viridis_d() +
+  guides(fill = FALSE)
+
+p1b
+
+# ggsave(p1b, filename = "global_level_2012_2016.pdf", 
+#        height = 6, width = 8, device = cairo_pdf)
+```
+
+Repeat for 1-4 year drought. Below is code for the county level plot, which is crazy big, so it's not included here.
+```{r}
+# extract and combine d1-d4 data
+ll <- l[2:5]
+drought <- paste(1:4, "yr")
+for(i in 1:4){ll[[i]]$drought <- drought[i]}
+l2 <- lapply(ll[1:4], 
+             function(x){
+               y <- x@data
+               return(y)})
+d14 <- do.call(rbind.data.frame, l2)
+
+p2 <- d14 %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), y = DIST_MI)) +
+  facet_grid(drought~CountyName) +
+  theme_minimal() +
+  labs(title = "Distance from Domestic Well Failures to Closest Water System",
+       subtitle = "Simulated 1, 2, 3 and 4 year droughts: County-Level Response",
+       y = "Distance (miles)", x = "Income Level") +
+  coord_flip(ylim = c(0,10)) +
+  scale_y_continuous(breaks = c(0,5,10))
+
+# ggsave(p2, filename = "county_level_d1_d4.pdf", 
+#        height = 6, width = 24, device = cairo_pdf)
+```
+
+
+```{r}
+p3 <- d14 %>% 
+  filter(!is.na(MHI16CAT)) %>% 
+  ggplot() +
+  geom_boxplot(aes(x = fct_relevel(MHI16CAT, "SDAC"), 
+                   y = DIST_MI, fill = MHI16CAT), alpha = 0.5) +
+  facet_wrap(~drought, ncol = 1) +
+  theme_bw() +
+  labs(title = "Distance between Domestic Well Failures & Closest Water System",
+       subtitle = "Simulated 1, 2, 3 and 4 year droughts: Central Valley Wide Response",
+       y = "Distance (miles)", x = "Income Level") +
+  coord_flip(ylim = c(0,10)) +
+  scale_y_continuous(breaks = c(0,5,10)) +
+  scale_fill_viridis_d() +
+  guides(fill = FALSE)
+
+p3
+# ggsave(p3, filename = "global_level_d1_d4.pdf", 
+#        height = 6, width = 8, device = cairo_pdf)
+```
+
+
+
+***  
+
+# **STATISTICS**
+
+## ANOVA
+
+$H_0 : \mu_{SDAC} = \mu_{DAC} = \mu_{MHI+}$  
+
+$H_1 : at \space least \space one \space mean \space isn't \space = to \space others$  
+
+Are there are significant difference in the means between SDAC, DAC, and MHI+ for the 2012-2016 drought?
+```{r}
+res_aov <- aov(near_MI ~ MHI16CAT, data = l[[1]]@data)
+summary(res_aov)
+```
+
+## Tukey Multiple pariwise comparisons
+```{r}
+TukeyHSD(res_aov)
+```
+
+
+The ANOVA suggests that we accept $H_1$, and Tukey's multiple pariwise comparisons suggests that there is a significant difference between DAC and MHI+ as well as SDAC and MHI+, and no difference between DC and SDAC. However, we haven't checked if the assumptions of the ANOVA are met.
+
+## Check assumptions of ANOVA
+
+The ANOVA test assumes that:  
+
+* the data are normally distributed  
+* the variance across groups are homogeneous  
+
+We can check that with some diagnostic plots.  
+
+### Check the homogeneity of variance assumption
+
+The residuals versus fits plot can be used to check the homogeneity of variances.  
+
+In the plot below, there is no evident relationship between residuals and fitted values (the mean of each groups), which is good. So, we can assume the homogeneity of variances.
+
+```{r}
+# 1. Homogeneity of variances
+plot(res_aov, 1)
+```
+
+It's also possible to use Bartlett's test or Levene's test to check the homogeneity of variances.  
+
+Levene's test is less sensitive to departures from normal distribution. 
+```{r}
+library(car)
+leveneTest(near_MI ~ MHI16CAT, data = l[[1]]@data)
+```
+From the output above we can see that the p-value is less than the significance level of 0.05. This means that there is evidence to suggest that the variance across groups is statistically significantly different. Therefore, we cannot assume the homogeneity of variances in the different treatment groups.
+
+### Relaxing the homogeneity of variance assumption
+
+The classical one-way ANOVA test requires an assumption of equal variances for all groups. In our data, the homogeneity of variance assumption turned out to be a problem: the Levene test was significant.
+
+> How do we save our ANOVA test, in a situation where the homogeneity of variance assumption is violated?  
+
+An alternative procedure (i.e.: Welch one-way test), does not require that assumption is implemented in the function `oneway.test()`, but we should really do multiple pairwise t-test with no assumption of equal variances, and no pooling of the SDs. 
+
+In this case, we find the same results as in the ANOVA: **the only significant differences are between DAC and MHI+, and SDAC and MHI+., and no significant difference exists between DAC and SDAC communities.** This is pretty obvious from the plots, and confirmed by these tests.
+
+```{r}
+# ANOVA test with no assumption of equal variances
+oneway.test(near_MI ~ MHI16CAT, data = l[[1]]@data)
+
+# Pairwise t-tests with no assumption of equal variances
+pairwise.t.test(l[[1]]@data$near_MI, l[[1]]@data$MHI16CAT,
+                 p.adjust.method = "BH", pool.sd = FALSE)
+```
+
+
+Note that, a non-parametric alternative to one-way ANOVA is Kruskal-Wallis rank sum test, which can be used when ANNOVA assumptions are not met. Again, we see that there is a significant difference between groups.
+```{r}
+kruskal.test(near_MI ~ MHI16CAT, data = l[[1]]@data)
+```
+
+
+

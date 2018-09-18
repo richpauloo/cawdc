@@ -1,0 +1,139 @@
+---
+title: "Clean and Prepare Test/Calibration Data"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+date: 2018-06-27
+author: Rich Pauloo
+---
+
+The purpose to this script is to clean and prepare the test data for model calibration in `06_calibration.Rmd`.
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message = FALSE,
+  error = FALSE,
+  warning = FALSE,
+  cache = TRUE
+)
+```
+
+Packages used.
+```{r}
+library(lubridate) # for dates
+library(here)      # for system agnostic file paths
+library(raster)    # for raster objects
+library(tidyverse) # general purpose data science toolkit
+library(sp)        # spatial objects
+library(tibbletime)# for tibble time grouped summaries
+```
+
+
+Load points, CV shapefile, and ensure everything is in the correct projection.
+```{r}
+# mercator projection
+merc <- crs("+proj=merc +lon_0=0 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+# read points and transform to mercator
+dw <- shapefile(here("data","dry_wells", "DrywellReports_20180523_v1_100thDegPrecision.shp"))
+dw <- spTransform(dw, merc)
+
+# read central valley alluvial basin boundary and transform to mercator
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary",
+                     "Alluvial_Bnd.shp"))
+cv <- spTransform(cv, merc)
+```
+
+First glimpse of the data.
+```{r}
+plot(cv)
+points(dw, pch = 19, cex = 0.1)
+```
+
+Subset for points within the CV.
+```{r}
+dwcv <- dw[cv, ]
+```
+
+Ensure they plot in the CV.
+```{r}
+plot(cv)
+points(dwcv, pch = 19, cex = .1)
+```
+
+Subset the points to domestic well outages during the 2012-2016 drought. First need to merge spatial data with another table containing this information.
+```{r}
+# read in data without geometry (points)
+dw_dat <- readxl::read_xlsx(here("data","dry_wells","DrywellReports_20180523_v1_PersonalInfoRedacted.xlsx"))
+
+# replace all cases of "groundwater shortage" with the same ID
+dw_dat$Shortages <- 
+  dw_dat %>% 
+    pull(Shortages) %>% 
+    str_replace(c("Pump not working","pump stopped working.",
+                  "lack of water, well level dropping- intermitent water production"), 
+                  "Dry well (groundwater)")
+
+# clean dates
+dw_dat <- dw_dat %>% 
+  rename(issue_date = `Approximate Issue Start Date`,    # better column name
+         report_date = `Record Creation Date`)           # better column name
+
+dw_dat$issue_date  <- lubridate::ymd(dw_dat$issue_date)  # POSIXct to Date
+dw_dat$report_date <- as_date(dw_dat$report_date)        # POSIXct to Date
+
+dw_dat <- dw_dat %>% 
+  # if the issue date is missing, replace with report date
+  mutate(issue_date = ifelse(is.na(issue_date), report_date, issue_date)) %>% 
+  mutate(issue_date = as_date(issue_date)) # put back into date format
+
+# subset to events during the 2012-2016 drought
+dw_dat2 <- dw_dat %>% 
+  filter(year(issue_date) >= 2012 & year(issue_date) <= 2016) %>% 
+  rename(Drywell_ID = `Drywell ID`)
+
+# perform the join of tabluar and spatial data
+dwcv@data$Drywell_ID <- as.numeric(dwcv@data$Drywell_ID) # convert to numeric for join
+dwcv@data <- left_join(dwcv@data, dw_dat2, by = "Drywell_ID") %>% # join by ID
+  mutate(issue_date = ifelse(is.na(issue_date),   # if issue dates are missing
+                             as_date(Report_Dat), # give them report dates
+                             issue_date), 
+         issue_date = as_date(issue_date))  
+
+# filter out dates from spatial object that don't match drought years
+dwcv1 <- dwcv[which(year(dwcv@data$issue_date) >= 2012 & 
+                    year(dwcv@data$issue_date) <= 2016), ]  
+```
+
+Take a look at dry well reports over time. 
+```{r, include = FALSE}
+dwtt <- as_tbl_time(dwcv1@data, index = issue_date)
+dwtt %>% 
+  arrange(issue_date) %>% 
+  collapse_by("monthly") %>% 
+  group_by(issue_date) %>% 
+  summarise(count = n ()) %>% 
+  ggplot() +
+  geom_line(aes(issue_date, count), lwd = 1) +
+  geom_rect(aes(xmin = make_date(2012, 01, 01), xmax = make_date(2016, 12, 31),
+                ymin = 0, ymax = 1150), fill = "red", alpha = 0.01) +
+  coord_cartesian(ylim = c(0, 1100)) +
+  scale_y_continuous(breaks = seq(0,1000,250), limits = seq(0,100,250)) +
+  labs(title = "Domestic Well Failure Reports",
+       subtitle = "Aggregated By Month",
+       y = "Count", x = "Date") +
+  theme_minimal()
+```
+
+Export for validation script.
+```{r}
+shapefile(dwcv1, here("data", "dry_wells", "cleaned_dw", "dwcv.shp"))
+```
+

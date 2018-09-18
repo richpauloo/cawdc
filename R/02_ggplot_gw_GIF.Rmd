@@ -1,0 +1,210 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+library(readr)
+library(tidyverse)
+library(here)
+
+# read in seasonal interpolations
+ml <- read_rds(here("code", "ml.rds"))
+
+# extract the interpolation
+ensemble <- lapply(ml, function(x){x$Ensemble})
+
+# construct plot titles and prefixes for saving in order
+titles   <- c("SPRING 2011","SPRING 2012", 
+              paste(rep(c("SPRING","FALL"),5), 
+                    rep(2013:2017, each=2)))
+prefix <- sprintf("%02d", 1:12)
+
+
+# plot
+plist <- lapply(1:12, function(j){
+  ensemble[[j]] %>% 
+  as.data.frame(xy = TRUE) %>% 
+  mutate(Ensemble = ifelse(Ensemble >= 400, 400, Ensemble)) %>% 
+  ggplot(aes(x,y)) +
+  geom_raster(aes(x,y, fill = Ensemble)) +
+  coord_fixed(1.1) + 
+  theme_void() +
+  labs(fill = "Feet",
+       title = titles[j],
+       subtitle = "Groundwater Depth Below Land Surface") +
+  scale_fill_continuous(type = "viridis", na.value="transparent")}
+)
+   
+lapply(1:12, 
+       function(j){
+         ggsave(plist[[j]], file = paste0(prefix[j], "_gwl.png"), dpi = 300, height = 10, width = 7 )
+         }
+       )
+
+getwd()
+```
+
+Redo with satellite map, and only from spring 2012 - Fall 2016
+```{r}
+# add satelite map
+cv <- raster::shapefile(here("data",
+                             "spatial",
+                             "central_valley_alluvial_boundary",
+                             "Alluvial_Bnd.shp"))
+
+cv <- sp::spTransform(cv, crs("+proj=longlat +ellps=WGS84 +towgs84=0,0,0,0,0,0,0 +no_defs"))
+
+library(colormap)
+library(ggmap) # doesn't plot with SF so need to convert
+location <- c(median(coordinates(cv)[,1]),
+              median(coordinates(cv)[,2]))
+smap <- get_map(location=bbox(cv),
+                color="color",
+                maptype="satellite",
+                source="google", zoom = 6)
+
+sat_bg <- ggmap(smap)
+
+ensemble2 <- lapply(ensemble, 
+                    raster::projectRaster, 
+                    crs = crs("+proj=longlat +ellps=WGS84 +towgs84=0,0,0,0,0,0,0 +no_defs"))
+
+dfl <- list()
+for(i in 1:12){
+  dfl[[i]] <- as.data.frame(ensemble2[[i]], xy = T)
+  dfl[[i]]$title <- titles[i]
+}
+
+dfv <- do.call(rbind, dfl) %>% 
+  mutate(Ensemble = ifelse(Ensemble >= 500, 500, Ensemble),
+         Ensemble = ifelse(Ensemble <= -200, -200, Ensemble))  
+
+# diagnostics for setting breaks
+scale_min <- dfv$Ensemble %>% min(na.rm=T) %>% round(., digits = 0)
+scale_max <- dfv$Ensemble %>% max(na.rm=T) %>% round(., digits = 0)
+d <- (scale_max - scale_min) / 16
+
+lab <- paste(formatC(seq(scale_min, 
+                         scale_max - d, d), digits = 0, format = "f"), 
+             "-", 
+             formatC(seq(scale_min + d,
+                         scale_max, d), digits = 0, format = "f"))
+
+dfv$bin <- base::cut(dfv$Ensemble, breaks = seq(scale_min, scale_max, d), labels = lab)
+dfv <- filter(dfv, !is.na(Ensemble))
+
+titles2 <- paste(substr(titles, 1, 2), substr(titles, nchar(titles)-3, nchar(titles)))
+
+# plot
+plist <- lapply(2:10, function(j){
+  df <- dfv %>% filter(title == titles[j]) 
+  sat_bg +
+    geom_raster(data = df, aes(x,y, fill = bin)) +
+    theme_black() +  # RUN FROM LAST CHUNK OF THIS SCRIPT!
+    annotate("text", x = -122.3, y = 35, 
+             label = titles2[j], color = "white",
+             size = 3) +
+    labs(fill = "Feet BLS", #,
+         title = NULL,#titles[j],
+         x = NULL, y = NULL,
+         subtitle = NULL) + #"Groundwater Depth Below Land Surface") +
+    scale_fill_manual(values = colormap(colormaps$jet, nshades=length(lab), alpha = .7),
+                    breaks = lab,
+                    labels = lab) +
+    guides(fill = FALSE) +
+    coord_fixed(ratio = 1.1) #, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+    
+  }
+)
+   
+lapply(2:10, 
+       function(j){
+         ggsave(plist[[j-1]], 
+                file = paste0(prefix[j], "_gwl.png"), 
+                dpi = 300, height = 11, width = 6 )
+         }
+       )
+
+```
+
+
+```{r}
+# differnce the rasters for change in gw level
+ed <- lapply(2:12, function(j){ensemble[[j]]- ensemble[[1]]})
+
+plist <- lapply(1:11, function(j){
+  ed[[j]] %>% 
+  as.data.frame(xy = TRUE) %>% 
+  mutate(layer = ifelse(layer >= 400, 400, layer)) %>% 
+  ggplot(aes(x,y)) +
+  geom_raster(aes(x,y, fill = layer)) +
+  coord_fixed(1.1) + 
+  theme_void() +
+  labs(fill = "Feet",
+       title = titles[j+1],
+       subtitle = "Groundwater Depth Below Land Surface") +
+  scale_fill_continuous(type = "viridis", na.value="transparent", limits = c(0, 400))}
+)
+
+lapply(1:12, 
+       function(j){
+         ggsave(plist[[j]], file = paste0(prefix[j+1], "_gwd.png"), dpi = 300, height = 10, width = 7 )
+         }
+       )
+
+getwd()
+```
+
+
+
+```{r}
+library(gridExtra)
+library(ggplot2)
+ 
+theme_black = function(base_size = 12, base_family = "") {
+ 
+  theme_grey(base_size = base_size, base_family = base_family) %+replace%
+ 
+    theme(
+      # Specify axis options
+      axis.line = element_blank(),  
+      axis.text.x = element_text(size = base_size*0.8, color = "white", lineheight = 0.9),  
+      axis.text.y = element_text(size = base_size*0.8, color = "white", lineheight = 0.9),  
+      axis.ticks = element_line(color = "white", size  =  0.2),  
+      axis.title.x = element_text(size = base_size, color = "white", margin = margin(0, 10, 0, 0)),  
+      axis.title.y = element_text(size = base_size, color = "white", angle = 90, margin = margin(0, 10, 0, 0)),  
+      axis.ticks.length = unit(0.3, "lines"),   
+      # Specify legend options
+      legend.background = element_rect(color = NA, fill = "black"),  
+      legend.key = element_rect(color = "white",  fill = "black"),  
+      legend.key.size = unit(1.2, "lines"),  
+      legend.key.height = NULL,  
+      legend.key.width = NULL,      
+      legend.text = element_text(size = base_size*0.8, color = "white"),  
+      legend.title = element_text(size = base_size*0.8, face = "bold", hjust = 0, color = "white"),  
+      legend.position = "right",  
+      legend.text.align = NULL,  
+      legend.title.align = NULL,  
+      legend.direction = "vertical",  
+      legend.box = NULL, 
+      # Specify panel options
+      panel.background = element_rect(fill = "black", color  =  NA),  
+      panel.border = element_rect(fill = NA, color = "white"),  
+      panel.grid.major = element_line(color = "grey35"),  
+      panel.grid.minor = element_line(color = "grey20"),  
+      panel.margin = unit(0.5, "lines"),   
+      # Specify facetting options
+      strip.background = element_rect(fill = "grey30", color = "grey10"),  
+      strip.text.x = element_text(size = base_size*0.8, color = "white"),  
+      strip.text.y = element_text(size = base_size*0.8, color = "white",angle = -90),  
+      # Specify plot options
+      plot.background = element_rect(color = "black", fill = "black"),  
+      plot.title = element_text(size = base_size*1.2, color = "white"),  
+      plot.margin = unit(rep(1, 4), "lines")
+ 
+    )
+ 
+}
+```
+

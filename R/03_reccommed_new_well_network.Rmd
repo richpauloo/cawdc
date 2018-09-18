@@ -1,0 +1,903 @@
+---
+title: "Data Driven & Spatially Sound Recommendations for a Central Valley-wide Monitoring Well Network"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+date: 2018-06-13
+author: Rich Pauloo
+---
+
+# Introduction  
+
+California's Central Valley wide monitoring well network is a valuable public dataset of groundwater level information, but not all of the value that it is capable of providing has has been realized.  
+
+Data collection occurs twice per year--once in Spring and once in Fall--across a network of ~7,752 unique wells. Samples are taken by hand, which introduces temporal variability in the sample. Springtime collection occurs from January to May, peaking in March, and Fall collection occurs from September through November, peaking in October. Moreover, sampling 7,000 wells is not only a large task, but also not necessary to gain a dsired spatial resolution. Thus, 3,000 to 6,000 wells wells are typically sampled per season, giving anywhere from 55-71% coverage at the resolution of the Township. From season to season, different wells are sampled, making it difficult to construct well hydrographs.  
+
+California needs a database of reliable and consistent groundwater level observations more than ever to monitor this vital public resource, and facilitate transparent, data-driven science and policy. Such a database will enable Californians to tackle the challenges presented by SGMA, groundwater overdraft, and climate change.  
+
+Automation of the data collection by remote sensors is an efficient, and cost-effective method to monitor groundwater in California in real-time.  
+
+A realizable first goal for California is to establish a monitoring well network at the resolution of the Township (4.24 mile accuracy).  
+
+This minimal subset of wells, when outfitted with remote telemetry, will power the first ever Central-Valley wide **Groundwater Observatory**. It will provide unprecedented spatial and temporal coverage of groundwater levels in the Central Valley. This data will be availble for download in real-time via on online mapping interface, and will faciliate groundwater regulation, enable hydrological model calibration, groundtruth remotely sensed data, and help the public visualize and understand groundwater flux.  
+
+***  
+
+# Methods
+
+Monitoring network data for years was obtained from the [State of California](https://gis.water.ca.gov/app/gicima/).  
+
+The purpose of this script is to analyze exisiting spatial patterns in California's Central Valley monitoring well network and propose:  
+
+* the subset of existing wells in the monitoring well database, and  
+* the locations of new monitoring wells to be incorporated into the network  
+
+that grants a spatial resolution of wells at the Township level (4.24 mile accuracy), and eliminates redundant wells.  
+
+***  
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message = FALSE,
+  error = FALSE,
+  warning = FALSE,
+  cache = TRUE
+)
+```
+
+# Code
+
+## Current Spatial Coverage
+
+Packages used.
+```{r}
+library(here)      # for system agnostic file paths
+library(tidyverse) # general purpose data science toolkit
+library(rgeos)     # spatial functions
+library(sp)        # spatial objects
+library(raster)    # for raster objects
+library(colormap)  # for color palletes
+library(geosphere) # for calculating distances between points
+pal <- colormap(nshades = 4) # palette
+```
+
+First we need to know where we're even interested in monitoring. Not all areas of the Central Valley have domestic or agricultural wells. Let's create township level buffers around the wells we're concerned with monitoring (wells 40 years old and younger), and find the area of the central valley that corresponds with.
+```{r}
+# online state well completion report data
+load(here("data","oswcr","clean_dat.RData")) 
+
+# central valley alluvial basin boundary
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary",
+                     "Alluvial_Bnd.shp"))
+
+# mercator projection
+merc <- crs("+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0
++k=1.0 +units=m +nadgrids=@null +no_defs")
+
+# lat long projection
+ll <- crs("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+# transform cv to mercator
+cv <- spTransform(cv, merc)
+cvl <- list("sp.lines", as(cv, 'SpatialLines')) # spatial lines for spplot
+
+
+# filter clean_dat to active domestic, ag, and public wells
+d <- clean_dat %>% filter(!is.na(year) & # remove missing years
+                          !is.na(lat) & !is.na(lon) & # remove missing locations
+                          year >= (2017 - 40), # active wells
+                          type %in% c("domestic","agriculture","public"))
+
+# make into spdf
+ds <- SpatialPointsDataFrame(coords = data.frame(d$lon, d$lat),
+                             data = d, 
+                             proj4string = ll)
+
+# transform to mercator
+ds <- spTransform(ds, merc)
+       
+# subset points to those in the central valley
+dcv <- ds[cv, ] 
+```
+
+```{r}
+# well types
+wtype <- c("public","domestic","agriculture")
+
+# colors
+pal <- colormap(colormaps$viridis, nshades = 3) 
+
+# plot
+png(filename = "cv_well_types.png", height = 400, width = 800, pointsize = 15)
+  p <- par(mfrow=c(1,3))
+    for(i in 1:3){
+      x <- dcv[which(dcv@data$type == wtype[i]),] # get the well type
+      n <- nrow(x) # calculate number of wells
+      n <- formatC(n, big.mark = ",") # format commas
+      plot(cv, main = wtype[i], sub = paste0("(nwell = ", n,")"))
+      plot(x, pch = 19, cex = 0.1, add = T, col = pal[i])
+    }
+  par(p)
+dev.off()
+```
+
+Add 3 mile (section level) buffers around the points. Townships are 36 square mile grids, with a maximum uncertainty in position of $\sqrt{18}$ miles.  
+```{r}
+# convert miles to meters
+miles_to_meters <- function(x){x * 1609.34}
+
+# township level accuracy (36 square miles)
+bt <- miles_to_meters(3)
+
+# calculate buffers: start with a list of the data subsets
+dlist <- list(bp = dcv[which(dcv@data$type == "public"), ], # public wells
+              bd = dcv[which(dcv@data$type == "domestic"), ], # domestic
+              ba = dcv[which(dcv@data$type == "agriculture"), ], # ag
+              bdp = dcv[which(dcv@data$type %in% c("domestic","public")), ], # domestic + public
+              ball = dcv) # all well types
+
+# calculate buffers: write a fucntion and apply it
+bufer_intersect <- function(x) {
+  # calculate the buffer
+  x = gBuffer(x, width = bt, capStyle = "SQUARE", joinStyle = "BEVEL")
+  # trim the buffer to the cv
+  x = intersect(x, cv)
+  return(x) # return result
+}
+
+#blist <- lapply(dlist, bufer_intersect) # apply the function
+#write_rds(blist, "blist.rds") # save this because it takes a while to compute
+blist <- read_rds("blist.rds")
+
+# plot
+wtype <- c(wtype, "domestic & public", "all well types")
+png(filename = "cv_well_types_buffer.png", height = 800, width = 1600, pointsize = 15)
+  p <- par(mfrow=c(2,3))
+    for(i in 1:5){
+      x <- dlist[[i]] # get the well type
+      n <- nrow(x)    # calculate number of wells
+      n <- formatC(n, big.mark = ",") # format commas
+      pc <- gArea(blist[[i]]) / gArea(cv)
+      plot(cv, col = pal[4],
+           main = wtype[i], 
+           sub = paste0("Coverage: ", round(pc*100, 2), "%", "\n",
+                        "(nwell = ", n,")"))
+      plot(blist[[i]], add = T, col = "grey90")
+      legend(-13400000,  4820000, 
+             legend = c("Covered", "Uncovered"), 
+             pch = 19, 
+             col = c("grey90", pal[4]), 
+             border = FALSE)
+    }
+  par(p)
+dev.off()
+```
+
+For this analysis, we're concerned with covering the area of land covered by public, domestic, and agricultural wells, which accounts for 95% of the area in the central valley.
+```{r}
+uall <- union(blist[[5]]) # union of all well types polygon
+```
+
+
+Compute and export reccommended areas for increased data collection. Take a buffer approach with township and section level spatial resolution, using the exisiting network of wells.  
+```{r}
+# load data from 02_interpolate_all_seasons.Rmd
+dl_cv <- read_rds("dl_cv.rds") # list of spatial points ordered by season: 2011-2017
+
+# find all unique wells
+all_d <- do.call(rbind, dl_cv)
+#length(unique(all_d$Site_Code))
+
+# remove duplicate locations
+ad <- remove.duplicates(all_d)
+ad_distinct_links <- ad@data %>% distinct(Link_to_WD) %>% pull(Link_to_WD) # distinct links
+ad <- ad[match(ad_distinct_links, ad@data$Link_to_WD), ] # distinct wells in terms of link
+```
+
+
+First evaluate the current coverage area per year.
+```{r}
+bl <- lapply(dl_cv, function(x) gBuffer(x, width = bt, capStyle = "SQUARE", joinStyle = "BEVEL") ) # township level buffer list
+blc <- lapply(bl, intersect, cv) # buffer list cropped to cv
+```
+
+Let's visualize buffers and calculate coverage areas. Blue dots represent the locations of monitoring wells. Grey zones around the blue dots are the buffers showing the Township-level accuracy. Red areas are zones that are not covered at the Township level of accuracy.  
+```{r}
+title <- paste(c("SP","FA"), rep(2011:2017, each=2))[-c(2,4)] # titles
+pc <- do.call(c, lapply(1:12, function(x) gArea(blc[[x]]) / gArea(uall))) # percent coverage
+
+for(i in 1:length(bl)){
+  pc <- gArea(blc[[i]]) / gArea(uall) # coverage at the township level
+  plot(cv)
+  plot(uall, col = pal[4], add = TRUE,
+       main = title[i], 
+       sub = paste0("Coverage: ", round(pc*100, 2), "%")) # uall
+  plot(blc[[i]], col = "grey90", add = T) # the buffer
+  plot(dl_cv[[i]], add = T, pch = 19, cex = .1, col = pal[2]) # points that made the buffer
+}
+
+# make these pretty for export
+png(filename = "buffer_1.png", height = 1600, width = 1600, pointsize = 15)
+p <- par(mfrow = c(2,3))
+for(i in 1:6){
+  pc <- gArea(blc[[i]]) / gArea(uall) # coverage at the township level
+  plot(cv,  
+       main = title[i], cex.main = 3, cex.sub = 2,
+       sub = paste0("Coverage: ", round(pc*100, 2), "%", "\n", "(nwells = ", nrow(dl_cv[[i]]),")")) # cv
+  plot(uall, col = pal[4], add = TRUE) # uall
+  plot(blc[[i]], col = "grey90", add = T) # the buffer
+  plot(dl_cv[[i]], add = T, pch = 19, cex = .1, col = pal[2]) # points that made the buffer
+  if(i ==7){
+  legend(-13400000,  4820000, 
+         legend = c("Well", "Covered", "Uncovered"), 
+         pch = 19, col = c(pal[2], "grey90", pal[4]), 
+         border = FALSE, cex = 2)}
+}
+par(p)
+dev.off()
+
+png(filename = "buffer_2.png", height = 1600, width = 1600, pointsize = 15)
+p <- par(mfrow = c(2,3))
+for(i in 7:12){
+  pc <- gArea(blc[[i]]) / gArea(uall) # coverage at the township level
+  plot(cv,  
+       main = title[i], cex.main = 3, cex.sub = 2,
+       sub = paste0("Coverage: ", round(pc*100, 2), "%", "\n", "(nwells = ", nrow(dl_cv[[i]]),")")) # cv
+  plot(uall, col = pal[4], add = TRUE) # uall
+  plot(blc[[i]], col = "grey90", add = T) # the buffer
+  plot(dl_cv[[i]], add = T, pch = 19, cex = .1, col = pal[2]) # points that made the buffer
+  if(i ==7){
+  legend(-13400000,  4820000, 
+         legend = c("Well", "Covered", "Uncovered"), 
+         pch = 19, col = c(pal[2], "grey90", pal[4]), 
+         border = FALSE, cex = 2)}
+}
+par(p)
+dev.off()
+
+# for gif
+for(i in 1:12){
+  png(filename = paste0(sprintf("%02d", i),"_","buffer.png"), height = 800, width = 800, pointsize = 15)
+    pc <- gArea(blc[[i]]) / gArea(uall) # coverage at the township level
+    n <- formatC(nrow(dl_cv[[i]]), big.mark = ",") # nwells
+     plot(cv, col = pal[4], 
+         main = title[i], cex.main = 3, cex.sub = 1.5,
+         sub = paste0("Coverage: ", round(pc*100, 2), "%","\n", "(nwells = ", n,")")) # cv
+    plot(blc[[i]], col = "grey90", add = T) # the buffer
+    plot(dl_cv[[i]], add = T, pch = 19, cex = .1, col = pal[2]) # points that made the buffer
+    legend(-13400000,  4820000, legend = c("Well", "Covered", "Uncovered"), pch = 19, col = c(pal[2], "grey90", pal[4]), border = FALSE, cex = 1)
+  dev.off()
+}
+```
+
+Assume we optimze the well network for spatial coverage, and used all unique well locations. Calculate maximum possible coverage area using all wells in the network.
+```{r}
+# calulate buffers
+# buff_sec <- gBuffer(ad, width = bs) # section level buffer
+buff_ts <- gBuffer(ad, width = bt, capStyle = "SQUARE", joinStyle = "BEVEL")# township level buffer
+buff_ts <- intersect(buff_ts, cv)     # trim excess buffer to cv
+pc <- gArea(buff_ts) / gArea(uall)      # percent coverage
+
+# visualize and export
+png(filename = "max_potential_with_existing_network.png", height = 1600, width = 1600, pointsize = 15)
+  plot(cv, cex.main = 3, cex.sub = 1.5,
+       main = "Max Coverage Utilizing All Existing Wells", 
+       sub = paste0("Coverage = ", round(pc*100, 2), "%", "\n", 
+                    "(nwell = ", formatC(nrow(ad), big.mark = ","),")"))
+  plot(uall, col = pal[4], add = T)
+  plot(buff_ts, col = "grey90", add = T) # the buffer
+  plot(ad, add=T, pch = 19, cex = .1, col = pal[2]) # points that made the buffer
+  legend(-13400000,  4820000, legend = c("Well", "Covered", "Uncovered"), pch = 19, col = c(pal[2], "grey90", pal[4]), border = FALSE, cex = 1.5)
+dev.off()
+```
+
+The map above shows that (1) we obtain ~85% coverage by sampling all of the 6,113 unique wells in the network, (2) gaps in the data tend to occur at the edges of the alluvial basin boundary, and (3) many of the points sample the same range. If only we could spread out these sampling locations, then we would have better valley-wide coverage.    
+
+In order to minimize the number of wells in California, subject to the constraint of maximizing spatial coverage at the Township level of accuracy, we must:  
+
+* expand the network of monitoring wells in the Central Valley, and  
+* identify the subset of exisiting wells in the network to resample  
+
+That analysis is presented below.  
+
+
+***  
+
+## Recommended Monitoring Grid 
+
+First we create a sampling grid that encompasses our desired spatial resolution of coverage. The resolution of this network is set at the township width.
+```{r}
+r <- raster(uall)
+res(r) <- bt * 2             # set resolution of raster = township accuracy
+g <- as(r, "SpatialPolygons")# convert raster to polygons
+gi <- intersect(g, uall)     # get polygons inside union of buffer from all active wells
+
+# filter out polygons that are less than half of the area of  normal grid cell
+pareas <- sapply(1:length(gi@polygons), function(x) gi@polygons[[x]]@area)
+max_tol <- max(pareas) * .5   # maximum tolerance for size of polygon
+gil <- gi[which(pareas > max_tol), ] # filter out teeny tiny polygons
+gc <- gCentroid(gil, byid=T)   # get centroids of polygons
+gc <- gc[uall, ]              # get centroids inside union of buffer from all active wells
+```
+
+Visualize the grid and centroids. At this resolution, we can achieve near central valley wide monitoring with as little as **1,030 wells**. 
+```{r}
+coverage <- round( ((gArea(gil) / gArea(uall) ) * 100), 2)
+
+png(filename = "minimal_network.png", height = 1600, width = 1600, pointsize = 15)
+  plot(cv, cex.main = 3, cex.sub = 2,col = pal[4],
+       main = "Max Coverage with Optimzed Network",
+       sub = paste0("Coverage = ", coverage,"%", "\n", "(nwell = ", length(gc), ")"))
+  plot(gil, lwd = 0.1, add = TRUE, col = "grey90") # plot the polygons
+  plot(gc, pch = 19, cex = .75, col = pal[2], add=T) # add the centroid points
+  legend(-13400000,  4820000, legend = c("Well", "Covered", "Uncovered"), pch = 19, col = c(pal[2], "grey90", pal[4]), border = FALSE, cex = 1.5)
+dev.off()
+```
+
+Combine seasonal coverage maps with optimuized coverage. 
+```{r}
+png(filename = "existing_and_optized_network.png", height = 1600, width = 1600, pointsize = 15)
+
+  # define a layout for plots
+  layout.matrix <- cbind(matrix(1:12, nrow = 4, ncol = 3, byrow = T), rep(13, 4))
+  
+  layout(mat = layout.matrix,
+         heights = c(1,1,1,1), # Heights of the 4 rows
+         widths = c(1,1,1,3)) # Widths of the 4 columns
+  
+  # season by season plots
+  for(i in 1:12){
+      pc <- gArea(blc[[i]]) / gArea(uall) # coverage at the township level
+      n <- formatC(nrow(dl_cv[[i]]), big.mark = ",") # nwells
+      plot(cv,  
+           main = title[i], cex.main = 3, cex.sub = 2,
+           sub = paste0("Coverage: ", round(pc*100, 2), "%","\n", "(nwell = ", n,")")) # cv
+      plot(uall, col = pal[4], add=T)
+      plot(blc[[i]], col = "grey90", add = T) # the buffer
+      plot(dl_cv[[i]], add = T, pch = ".", cex = .01, col = pal[2]) # points that made the buffer
+  }
+  
+  # minimal optimzed network
+    plot(cv, cex.main = 4, cex.sub = 4,
+         main = "Max Coverage with Optimzed Network",
+         sub = paste0("Coverage: ", coverage,"%", "\n", "(nwell = ", length(gc), ")"))
+    plot(uall, col = pal[4], add = T)
+    plot(gil, lwd = 0.1, add = TRUE, col = "grey90") # plot the polygons
+    plot(gc, pch = 19, cex = 1.5, col = pal[2], add=T) # add the centroid points
+    legend(-13400000,  4820000, legend = c("Well", "Covered", "Uncovered"), pch = 19, col = c(pal[2], "grey90", pal[4]), border = FALSE, cex = 3)
+
+dev.off()
+```
+
+
+Now we find the points in our big data set of all monitoring wells that are closest to the centroid points, and at least within the township level of accuracy for one polygon.  
+```{r}
+ll <- crs("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0") # crs of lat lon
+adp <- geometry(ad) # get only the geometry from spatial points df
+adpll <- spTransform(adp, ll) # transform all points to ll
+gcll <- spTransform(gc, ll)   # transform grid centroids to ll
+#dm <- distm(adpll, gcll)      # create distance matrix
+#write_rds(dm, "dm.rds")       # save this data
+```
+
+We want wells that come relatively close to our grid centroids, so we consider only the wells that fall within 2 miles of each grid centroid point (recall that each grid is 6 miles wide), and find the index of each closest point to the monitoring network grid centroids.
+```{r}
+dm <- read_rds("dm.rds") # read in saved distance matrix
+
+# function to calculate wells to keep at different levels of centroid accuracy
+calculate_wells_to_keep <- function(x, dm){
+  dm = dm * 0.000621371  # convert meters to miles
+  dm[dm >= x] <- NA # wells >= x distance from to grid centroid are not considered
+  mi <- apply(dm, 2, function(x){which(x == min(x, na.rm = T))}) # find the indices of the min values
+  
+  idx <- !(sapply(mi, length)) # find all 0 length vectors "integer(0)"
+  mi[idx] <- NA        # convert all of these indices to NA
+  mi <- do.call(c, mi) # bind them in a vector
+  cc <- (sum(!is.na(mi)) / length(mi)) # current coverage of the network
+  
+  # Now identify the subset of wells to keep for monitoring, and the grid cells that require a well.
+  mip <- mi[!is.na(mi)] # index of present wells in the data set
+  mina <- which(is.na(mi)) # index of NA wells in the gc data set
+  ad_keep <- ad[mip, ] # wells to keep 
+  ad_na <- gc[mina, ]  # wells to establish
+  return(list(cc = cc, # current network coverage in proportion 0 to 1
+              ad_keep = ad_keep, # spatial points of wells to keep 
+              ad_na = ad_na))    # spatial points of centroids where wells are needed
+}
+
+# apply the function over a range of accuracy levels
+acc <- seq(0.25, 3, 0.25) # accuracy levels
+#wtk <- lapply(acc, calculate_wells_to_keep, dm) # wells to keep at different levels of grid accuracy 
+#write_rds(wtk, "wtk.rds") # save
+```
+
+Now to visualize.
+```{r}
+wtk <- read_rds("wtk.rds") # read in well list
+
+# visualize and export
+png(filename = "proposed_network.png", height = 3200, width = 3200, pointsize = 30)
+
+  # define a layout for plots
+  layout.matrix <- cbind(matrix(1:12, nrow = 4, ncol = 3, byrow = T), rep(13, 4))
+  
+  layout(mat = layout.matrix,
+         heights = c(1,1,1,1), # Heights of the 4 rows
+         widths = c(1,1,1,3)) # Widths of the 4 columns
+
+  # centroid accuracy plots
+  for(i in 1:12){
+    plot(cv, cex.main = 2, cex.sub = 2, col = pal[4],
+       main = paste0("Centroid Accuracy: ", acc[i]," mi"),
+       sub = paste0("Coverage: ", round(wtk[[i]]$cc*100, 2), "%", "\n",
+                    "Wells Needed: ", length(gc) - length(wtk[[i]]$ad_keep) ))
+    plot(gil, lwd = 0.1, add = TRUE, col = "grey90", border = "grey90") # plot the polygons
+    points(wtk[[i]]$ad_keep, pch = 19, cex = .1, col = pal[3]) # add the centroid points
+    points(wtk[[i]]$ad_na, pch = 19, cex = .1, col = pal[1]) # wells to add
+    plot(cv, col = "transparent", add=T) # add the cv outline back in
+  }
+  
+  # 2 mile centroid accuracy plot
+  plot(cv, cex.main = 4, cex.sub = 4, col = pal[4],
+       main = paste0("Centroid Accuracy: ", 2," miles"),
+       sub = paste0("Existing Well Coverage: ", round(wtk[[8]]$cc*100, 2), "%", "\n",
+                    "Wells Needed: ", length(gc) - length(wtk[[8]]$ad_keep) ))
+    plot(gil, lwd = 0.1, add = TRUE, col = "grey90") # plot the polygons
+    points(wtk[[8]]$ad_keep, pch = 19, cex = 1.5, col = pal[3]) # add the centroid points
+    points(wtk[[8]]$ad_na, pch = 19, cex = 1.5, col = pal[1]) # wells to add
+    legend(-13400000,  4820000, legend = c("Existing Well","Well Needed", "Covered", "Uncovered"), 
+             pch = 19, cex = 3, col = c(pal[3], pal[1], "grey90", pal[4]), border = FALSE)
+  
+dev.off()
+
+
+# export for gif
+title_step <- formatC(1:12, width = 2, flag="0") # title prefix for ordering
+acc_f <- formatC(acc, format= "f", digits = 2)
+
+for(i in 1:12){
+  png(filename = paste0(title_step[i],"_proposed_network.png"), height = 1600, width = 1600, pointsize = 15)
+    plot(cv, cex.main = 5, cex.sub = 4, col = pal[4],
+       main = paste0("Centroid Accuracy: ", acc_f[i]," mi"),
+       sub = paste0("Coverage: ", round(wtk[[i]]$cc*100, 2), "%", "\n",
+                    "Wells Needed: ", length(gc) - length(wtk[[i]]$ad_keep) ))
+    plot(gil, lwd = 0.1, add = TRUE, col = "grey90") # plot the polygons
+    points(wtk[[i]]$ad_keep, pch = 19, cex = 1, col = pal[3]) # add the centroid points
+    points(wtk[[i]]$ad_na, pch = 19, cex = 1, col = pal[1]) # wells to add
+    legend(-13400000,  4820000, legend = c("Existing Well","Well Needed", "Covered", "Uncovered"), 
+             pch = 19, cex = 2.5, col = c(pal[3], pal[1], "grey90", pal[4]), border = FALSE)
+  dev.off()
+}
+```
+
+![](C:/Users/rpauloo/Desktop/water_data_challenge/code/00_figures/proposed_network.gif) 
+
+There is a clear tradefoff between the choice of accuracy to the grid centroid and the number of wells that need to be added to the network. Ideally, we'd like to minimize the number of new monitoring wells to add to the network, but also minimize the distance between existing wells and the centroids of our grid cells. The plot below shows this tradeoff. We'd need to install 250 new wells at a bare minimum to ensure a township level accuracy. For the sake of further exploration, let's select a centroid accuracy of 2 miles, which results in about 382 new wells to the network and a current coverage of 64%. Keep in mind that it is simple to go back and select a different option.
+```{r}
+# calculate the existing coverage and wells needed at various levels
+ec <- sapply(1:12, function(x) round(wtk[[x]]$cc*100, 2)) # exisiting coverage
+wn <- sapply(1:12, function(x) length(gc) - length(wtk[[x]]$ad_keep)) # wells needed
+
+# put into df and plot
+to <- data.frame(wells_needed = wn, accuracy = acc, existing_coverage = ec) %>% 
+  ggplot() +
+  geom_point(aes(wells_needed, accuracy, color = existing_coverage), size = 3) +
+  geom_rect(xmin = 170, xmax = 215, ymin = 1.9, ymax = 2.1, # highlight 2 mile accuracy
+            fill = NA, color = "red") + 
+  scale_color_viridis_c(limits = c(0,100), breaks = c(0,25,50,75,100)) +
+  coord_cartesian(ylim = c(0,3), xlim = c(0,1100)) +
+  scale_x_continuous(breaks = c(0,200,400,600,800,1000)) +
+  guides(color = guide_colorbar(barwidth = 1, barheight = 10, nbin = 4)) +
+  labs(title = "Tradeoff Between Centroid Accuracy and Wells Needed to Complete Network",
+       subtitle = "Proposed Groundwater Monitoring Well Network",
+       x = "Wells Needed to Compelete Network",
+       y = "Maximum Distance from Centroid (miles)",
+       color = "Existing Coverage (%)") +
+  theme_minimal()
+
+to
+
+#ggsave(to, file = "tradeoff.png", dpi = 300, height = 5, width = 8)# save
+```
+
+Now we proceed with the objective: a centroid accuracy of 2 miles. 
+```{r}
+# wtk[[8]] correponds to our choice of centroid accuracy
+plot(gi, lwd = 0.1,  # plot the polygons
+     main = paste0("Distance from centroid: ", acc[8]," miles"),
+     sub = paste0("Coverage with Existing Wells: ", round(wtk[[8]]$cc*100, 2), "%", "\n",
+                  "Wells Still Needed: ", length(gc) - length(wtk[[8]]$ad_keep) ))
+points(wtk[[8]]$ad_keep, pch = 19, cex = .1, col = pal[2]) # exisiting wells
+points(wtk[[8]]$ad_na, pch = 19, cex = .1, col = pal[4]) # wells needed
+legend(-13400000,  4820000, legend = c("Existing Well", "Well Needed"), pch = 19, col = c(pal[2], pal[4]), border = FALSE)
+```
+
+We can go one step further, and cross reference the coordinates of *grid centroids where we need a well* with well coordinates in *the online state well completion report database*, to identify the wells closest to the grid centroids that meet our accuracy criteria. Since we're drawing from a large sample of wells, we can be picky about the ttpes of wells, and the quality of wells. We will examine monitoring wells built within the last 40 years (rather than wells used to produce groundwater) to ensure an ambient groundwater signal.
+
+```{r}
+# get monitoring wells with location data
+cd <- clean_dat %>% 
+  filter(type == "monitoring" & year >= (2017 - 40) & # monitoring wells within 5 years
+           !is.na(lat) & !is.na(lon)) # lat lon present
+
+# make into spdf
+cdsp <- SpatialPointsDataFrame(coords = data.frame(cd$lon, cd$lat), data = cd, proj4string = ll)
+merc <- crs("+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0
++k=1.0 +units=m +nadgrids=@null +no_defs") # mercator projection
+cdsp <- spTransform(cdsp, merc) # transform points to mercator
+cdcv <- cdsp[cv, ] # subset points to those in the central valley
+```
+
+By plotting the monitoring wells in the OSWCR database, it's clear that we're not going to cover all of the remaining unsampled locations on our grid, but we may manage to cover a few important ones.
+```{r}
+plot(cv)
+plot(cdcv, add=T, pch = 19, cex = .1, col = pal[2]) # plot
+```
+
+Let's now identify the locations where we need wells.
+```{r}
+plot(cv)
+plot(uall, col = "grey90", add=T)
+plot(wtk[[8]]$ad_na, pch = 19, cex = 0.1, col = "blue", add=T)
+```
+
+And calculate another distance matrix between the active monitoring wells from OSWCR and these locations, constrained by an accuracy of 2 miles. The important variables here are:    
+
+* `wtk[[8]]$ad_na`: grid centroids to match  
+* `cdcv`: monitoring wells in OSWCR to draw matches from  
+
+In OSWCR location accuracy is at the section centroid, so for some grid centroids where we need a well there are multiple matches in OSCWR. Here, we take the first match for these centroids, and show all duplicate matches in Table 1 of the Appendix. Table 2 of the Appendix lists all monitoring well locations in the optimal network drawn from the exisiting monitoring well network, and supplemented by OSCWR. Table 3 shows the locations where a well is still needed.  
+
+```{r}
+ctm <- geometry(wtk[[8]]$ad_na) # geometry of centroids to match
+ctm <- spTransform(ctm, ll)     # transform to ll
+mw  <- geometry(cdcv)           # monitoring wells from OSWCR to match
+mw  <- spTransform(mw, ll)      # transform to ll
+dm2 <- distm(mw, ctm)           # create distance matrix
+
+dm2 <- dm2 * 0.000621371  # convert meters to miles
+dm2[dm2 >= 2] <- NA # wells >= x distance from to grid centroid are not considered
+mi <- apply(dm2, 2, function(x){which(x == min(x, na.rm = T))}) # find the indices of the min values
+  
+idx <- !(sapply(mi, length)) # find all 0 length vectors "integer(0)"
+mi[idx] <- NA        # convert all of these indices to NA
+mil <- lapply(mi, function(x) {x[1]} ) # break ties and take first wel match
+mil <- do.call(c, mil) # bind them in a vector
+cc <- (sum(!is.na(mil)) / length(mil)) # current coverage of the network
+  
+# Now identify the subset of wells to keep for monitoring, and the grid cells that require a well.
+mip <- mil[!is.na(mil)] # index of present wells in the data set
+mina <- which(is.na(mil)) # index of NA wells in the ctm data set
+ad_keep <- cdcv[mip, ] # wells to keep 
+ad_na <- ctm[mina, ]  # wells to establish
+```
+
+With OSWCR we can get another 67 wells out of 188 needed. The other 125 locations lack a well in OSWCR that meets our accuracy criteria. Let's visualize our new network and the coverage obtained from existing wells, OSWCR wells, and wells to be added. 
+```{r}
+existing_coverage  <- round(wtk[[8]]$cc*100, 2) # coverage from existing wells
+oswcr_gain         <- round((nrow(ad_keep) / length(gc))*100, 2) # coverage gained by adding oscwr wells
+count_wells_needed <- length(gc) - length(wtk[[8]]$ad_keep) - nrow(ad_keep) # wells needed to complete
+uncovered          <- 100 - existing_coverage - oswcr_gain # percent uncovered
+
+magma <- colormap(colormaps$magma, nshades = 4) # new color palette
+
+uncv_poly <- intersect(gil, spTransform(ad_na, merc)) # uncovered polygons
+
+# plot and export
+png(filename = "existing_plus_oswcr.png", height = 1600, width = 1600, pointsize = 15)
+  plot(cv, cex.main = 3, cex.sub = 2,
+       main = paste0("Optimal Monitoring Network (2 mi. centroid accuracy)"),
+       sub = paste0("Existing Coverage:         ", existing_coverage, "%", "\n",
+                    "OSCWR Supplements:    ", oswcr_gain, "%", "\n",
+                    "Residual Uncovered:      ", uncovered, "%", "\n",
+                    "Wells Still Needed:               ", count_wells_needed ))
+  plot(gil, lwd = 0.1, add = TRUE, col = "grey90") # plot the covered polygons
+  plot(uncv_poly, lwd = 0.1, add = TRUE, col = pal[4]) # plot the uncovered polygons
+  points(wtk[[8]]$ad_keep, pch = 19, cex = 1, col = pal[3]) # add the centroid points
+  points(ad_keep, pch = 19, cex = 1, col = magma[3]) # wells to add from OSWCR
+  plot(spTransform(ad_na, merc), pch = 19, cex = 1, col = pal[1], add=T) # wells to add
+  legend(-13400000,  4820000, 
+         legend = c("Existing Well", "OSWCR Addition","Well Needed", "Covered", "Uncovered"), 
+         pch = c(19,19,19,15,15), 
+         cex = 2, 
+         col = c(pal[3], magma[3], pal[1], "grey90", pal[4]), 
+         border = FALSE)
+dev.off()
+```
+
+
+***  
+
+## Cost
+
+How much would it cost to implement such a network? Fixed costs include remote telemetry equipment. Variable costs include establishing new monitoring wells, which in turn depend on the desired level of accuracy.  
+
+* quote from Mauricio  
+
+```{r}
+data.frame(Qty = )
+```
+
+
+
+***  
+
+## High Quality Well Logs
+
+If we were starting from scratch, we'd want to resolve another major issue with the existing monitoring well network aside from spatial and temporal discontinuity. That issue has to do with knowing if the monitoring well is screened in an unconfined to semi-confined to confined aquifer.  
+
+We now extend the analysis by bringing in the online state well completion report databse to identify high-quality well logs for unconfiend and confined aquifers, and recommended networks if we were to proceed from scratch.
+
+```{r}
+# clean WCR strings to match format in the gw level database
+clean_dat$WCR_Number = clean_dat$WCRNumber %>% 
+  str_replace("WCR","") %>% # remove all WCR patterns
+  str_replace("\\d{4}(?=-)-","") # remove year and dash patterns 
+
+wcrv <- clean_dat %>% pull(WCR_Number) # exxtract vector of wcr numbers 
+clean_dat$WCR_Number <- substr(wcrv,regexpr("[^0]",wcrv),nchar(wcrv)) # remove leading zeros
+
+# join gw level monitoring network with oswcr
+matches <- cbind.data.frame(ad@data, 
+                            clean_dat[match(ad@data$WCR_Number, clean_dat$WCR_Number), ])
+
+matches %>% dplyr::filter(is.na(top))
+```
+
+
+***  
+
+## Cost Evaluation
+
+
+
+***  
+
+
+# Appendix
+
+
+## Table 1
+*Grid centroids with multiple matches with monitoring wells in OSWCR.*  
+```{r}
+# table of wcr number and URL to report
+wcr_links <- read_csv(here("data","oswcr","WCRLinks_201801.csv"))
+
+# centroids of wells at 2 mile accuracy with multiple matches in OSWCR
+multiple_matches <- 
+  ctm[which(sapply(mi, length) > 1), ] %>% # indices where more than one match occurs
+  coordinates() %>% # extract coordinates
+  data.frame()
+
+# multiple matches in OSWCR for these grid centroids
+# extract the WCR Number for these matches
+wcr_vec<- 
+  sapply(which(sapply(mi, length) > 1), function(x){mi[[x]]}) %>% # indices in cdcv of multiple matches
+  lapply(., function(x){cdcv[x, ]}) %>% # extract spatial points dataframes with multiple matches
+  lapply(., function(x){x@data$WCRNumber}) %>% # extract the WCRNumber for each match
+  lapply(., function(x){data.frame(WCRNumber = x)}) %>% # convert to dataframe for dplyr methods
+  lapply(., function(x){left_join(x, wcr_links, by = "WCRNumber")}) %>% # join with links
+  lapply(., function(x){mutate(x, link = paste0("[",WCRNumber,"](",WCRLink,")"))}) %>% # create links
+  lapply(., function(x){pull(x, link)}) %>% # remove just the link
+  lapply(., function(x){paste(x, collapse = ", ")}) %>% # collapse links into a character vector
+  do.call(c, .) # combine into one vector
+
+# combine into one dataframe
+multiple_matches$WCR_Number <- wcr_vec # add WCRNumber vector to dataframe
+rownames(multiple_matches) <- NULL # remove rownames
+
+# table
+multiple_matches %>% 
+  rename(Longitude = x, Latitude = y, WCRNumber = WCR_Number) %>% 
+  dplyr::select(Latitude, Longitude, WCRNumber) %>% 
+  kable()
+```
+
+
+## Table 2
+*Existing wells to keep in the network for a 2 mile centroid accuracy at the Township level of resolution, plus wells from OSWCR that should go in.*  
+
+* WDL   = Water Data Library  
+* OSWCR = Online State Well Completion Report Database  
+
+```{r}
+# wells to keep in the existing monitoring network
+temp1 <- wtk[[8]]$ad_keep@data %>% 
+  tibble::rownames_to_column() %>% 
+  mutate(origin = "WDL") %>% 
+  dplyr::select(origin, WCR_Number, Latitude, Longitude, Link_to_WD) %>% 
+  rename(WCRLink = Link_to_WD, WCRNumber = WCR_Number) %>% 
+  left_join(., wcr_links, by = "WCRNumber") %>% # join OSWCR wells the URL data frame
+  rename(WCRLink = WCRLink.y, WDLLink = WCRLink.x) 
+
+# wells to add from OSWCR that meet centroid accuracy criteria
+temp2 <- ad_keep@data %>% 
+  tibble::rownames_to_column() %>% 
+  mutate(origin = "OSWCR") %>% 
+  dplyr::select(origin, WCRNumber, lat, lon) %>% 
+  rename(Latitude = lat, Longitude = lon) %>% 
+  left_join(., wcr_links, by = "WCRNumber") %>% 
+  mutate(WDLLink = NA)
+
+# combine dataframes and put into table
+rbind.data.frame(temp1, temp2) %>% 
+  mutate(WCRLink = paste0("[click](", WCRLink, ")"),
+         WDLLink = paste0("[click](", WDLLink, ")")) %>% 
+  dplyr::select(Latitude, Longitude, everything()) %>% 
+  kable()
+```
+
+## Table 3
+*Locations where a well is still needed.*
+```{r}
+# move from geographic to projected CRS for lat/lon in decimal degrees
+temp <- spTransform(ad_na, CRS("+init=epsg:4326"))
+
+# put into df and make table
+temp <- 
+  data.frame(ID = 1:length(temp@coords[,1]), # id column
+             Latitude  = temp@coords[, 2],   # lat
+             Longitude = temp@coords[, 1])   # lon
+rownames(temp) <- NULL                       # remove rownames
+
+# put into table
+temp %>% kable()
+```
+
+
+
+
+
+***  
+
+# Make nice figures for AGU NASA Hyperwall
+
+Run code until line 224, so that `blc` and `dl_cv` lists are in memory, or just read them in here, presaved. =)
+```{r}
+#write_rds(blc, "blc.rds")
+#write_rds(dl_cv, "dl_cv.rds")
+blc  <- read_rds("blc.rds")    # township buffer for each season around monitoring wells
+dl_cv <- read_rds("dl_cv.rds") # monitoring wells for each season
+dom_wells <- spTransform(dlist[[2]],  # domestic wells
+                         crs("+proj=longlat +ellps=WGS84 +towgs84=0,0,0,0,0,0,0 +no_defs"))
+```
+
+```{r}
+library(gridExtra)
+library(ggplot2)
+ 
+theme_black = function(base_size = 12, base_family = "") {
+ 
+  theme_grey(base_size = base_size, base_family = base_family) %+replace%
+ 
+    theme(
+      # Specify axis options
+      axis.line = element_blank(),  
+      axis.text.x = element_text(size = base_size*0.8, color = "white", lineheight = 0.9),  
+      axis.text.y = element_text(size = base_size*0.8, color = "white", lineheight = 0.9),  
+      axis.ticks = element_line(color = "white", size  =  0.2),  
+      axis.title.x = element_text(size = base_size, color = "white", margin = margin(0, 10, 0, 0)),  
+      axis.title.y = element_text(size = base_size, color = "white", angle = 90, margin = margin(0, 10, 0, 0)),  
+      axis.ticks.length = unit(0.3, "lines"),   
+      # Specify legend options
+      legend.background = element_rect(color = NA, fill = "black"),  
+      legend.key = element_rect(color = "white",  fill = "black"),  
+      legend.key.size = unit(1.2, "lines"),  
+      legend.key.height = NULL,  
+      legend.key.width = NULL,      
+      legend.text = element_text(size = base_size*0.8, color = "white"),  
+      legend.title = element_text(size = base_size*0.8, face = "bold", hjust = 0, color = "white"),  
+      legend.position = "right",  
+      legend.text.align = NULL,  
+      legend.title.align = NULL,  
+      legend.direction = "vertical",  
+      legend.box = NULL, 
+      # Specify panel options
+      panel.background = element_rect(fill = "black", color  =  NA),  
+      panel.border = element_rect(fill = NA, color = "white"),  
+      panel.grid.major = element_line(color = "grey35"),  
+      panel.grid.minor = element_line(color = "grey20"),  
+      panel.margin = unit(0.5, "lines"),   
+      # Specify facetting options
+      strip.background = element_rect(fill = "grey30", color = "grey10"),  
+      strip.text.x = element_text(size = base_size*0.8, color = "white"),  
+      strip.text.y = element_text(size = base_size*0.8, color = "white",angle = -90),  
+      # Specify plot options
+      plot.background = element_rect(color = "black", fill = "black"),  
+      plot.title = element_text(size = base_size*1.2, color = "white"),  
+      plot.margin = unit(rep(1, 4), "lines")
+ 
+    )
+ 
+}
+```
+
+```{r}
+# add satelite map
+cv <- raster::shapefile(here("data",
+                             "spatial",
+                             "central_valley_alluvial_boundary",
+                             "Alluvial_Bnd.shp"))
+
+cv <- sp::spTransform(cv, crs("+proj=longlat +ellps=WGS84 +towgs84=0,0,0,0,0,0,0 +no_defs"))
+
+#fortify polygons for ggplot
+
+# central valley
+cv@data$id = rownames(cv@data)
+cv_pts = fortify(cv, region="id")
+cv_df = left_join(cv_pts, cv@data, by="id")
+
+# buffered regions
+blc_df <- list()
+blc <- lapply(blc, spTransform, crs(cv)) # transform to right crs
+for(i in 1:12){
+  blc[[i]]@data$id = rownames(blc[[i]]@data)
+  blc_pts <- fortify(blc[[i]], region = "id")
+  blc_df[[i]] <- left_join(blc_pts, blc[[i]]@data, by = "id")
+}
+
+
+library(colormap)
+library(ggmap) # doesn't plot with SF so need to convert
+location <- c(median(coordinates(cv)[,1]),
+              median(coordinates(cv)[,2]))
+smap <- get_map(location=bbox(cv),
+                color="color",
+                maptype="satellite",
+                source="google", zoom = 6)
+
+sat_bg <- ggmap(smap)
+
+# MAP
+plist  <- list()
+titles <- c("SP 2011", "SP 2012", "SP 2013", "FA 2013", "SP 2014",
+            "FA 2014", "SP 2015", "FA 2015", "SP 2016", "FA 2016", 
+            "SP 2017", "FA 2017")
+
+for(i in 2:10){
+  plist[[i]] <- sat_bg +
+  geom_point(data = dl_cv[[i]]@data, aes(Longitude, Latitude), size = 0.001, color = "yellow") +
+  geom_path(data = cv_df, aes(long, lat, group = group), color = "red") +
+  annotate("text", x = -122.3, y = 35, 
+             label = title[i], color = "white",
+             size = 3)  +
+  theme_black() +
+  labs(x = NULL, y = NULL) +
+  coord_fixed(1.1)
+}
+
+
+lapply(3:11, 
+       function(j){
+         ggsave(plist[[j-1]], 
+                file = paste0(prefix[j], "_monitoring_wells.png"), 
+                dpi = 300, height = 11, width = 6)
+         }
+       )
+```
+
+Domestic wells in study
+```{r}
+temp <- dom_wells@data %>% filter(year <= 2016)
+
+p_dom_nasa <- sat_bg +
+  geom_point(data = temp, aes(lon, lat), size = 0.001, color = "yellow") +
+  geom_path(data = cv_df, aes(long, lat, group = group), color = "red") +
+  annotate("text", x = -121.3, y = 35, 
+             label = "~65k Domestic Wells", color = "white",
+             size = 3)  +
+  theme_black() +
+  labs(x = NULL, y = NULL) +
+  coord_fixed(1.1)
+
+ggsave(p_dom_nasa, filename = "p_dom_nasa.png", dpi = 300, height = 11, width = 6)
+```
+

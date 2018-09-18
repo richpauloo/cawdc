@@ -1,0 +1,164 @@
+---
+title: "Make Drought Scenarios"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+    highlight: "pygments"
+date: 2018-07-03
+author: Rich Pauloo
+---
+
+The purpose of this script is to make drought scenarios informed by data from the past (2012-2016) drought.
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message    = FALSE,
+  error      = FALSE,
+  warning    = FALSE,
+  cache      = TRUE
+)
+```
+
+Load up predicitons of groundwater level.
+```{r}
+library(raster)
+library(tidyverse)
+library(here)
+
+# list of gw level interpolations
+ml <- read_rds("ml.rds") 
+
+# central valley
+cv <- read_rds("cv.rds")
+
+# domestic wells
+domcv10 <- read_rds("domcv10.rds")
+domcv10 <- spTransform(domcv10, crs(cv))
+
+# extract ensemble prediction
+e <- lapply(1:12, function(x){ml[[x]]$Ensemble})
+```
+
+```{r}
+# pre-drought
+pd <- e[[1]]
+  
+# drought
+d <- mean(e[[2]], e[[3]],e[[4]], e[[5]],e[[6]], e[[7]],e[[8]], e[[9]],e[[10]])
+
+# initial drought: spring 2011 and sprign 2012 GW levels
+di <- mean(e[[1]], e[[2]])
+
+# final drought: spring and fall 2016 GW levels
+df <- mean(e[[9]], e[[10]])
+```
+
+Many ways to define the change in GW level over the drought, but we use:  
+
+$\Delta H = H_f - H_i$  
+
+Where:  
+
+$\Delta H$ is the change in groundwater level over the 2012-2016 drought  
+$H_f$ is the mean groundwater level of Spring and Fall 2016  
+$H_i$ is the mean groundwater level of Spring 2011 and Spring 2012  
+
+We also remove 5% of the outliers fromt he high and low ends of the distribution, which incidentally coincide with areas of low to zero domestic well occurence.  
+```{r}
+diff <- (df - di)
+# diff <- (d - pd)
+# diff <- (d- di)
+
+
+# find the 2.5% and 97.5% quantiles
+q <- quantile(na.omit(diff@data@values), probs = c(0.025, 0.975))
+
+# omit these and replot to see main trend
+diff2 <- diff
+diff2@data@values[diff2@data@values < q[1] | diff@data@values > q[2]] <- NA
+```
+
+Visualize.
+```{r}
+# map and histogram 
+diff2 %>% plot()
+diff2 %>% hist()
+```
+
+Visualize.
+```{r}
+png(filename = "diff.png", height = 800, width = 800, pointsize = 20)
+  par(mfrow=c(2,2))
+  
+  # plot 1 shows raw data
+  plot(diff, main = "Drought - Pre-Drought")
+  plot(cv, add = TRUE)
+  
+  # plot 2 shows omitted extreme values
+  plot(diff2, main = "Without Outliers")
+  plot(cv, add = TRUE)
+  
+  # plot of raw data histogram
+  hist(diff, main = "", xlab = "GW Depth Below Land Surface (ft.)")
+  
+  # plot of omitted histogram
+  hist(diff2, main = "", xlab = "GW Depth Below Land Surface (ft.)")
+
+dev.off()
+
+
+png(filename = "diff2.png", height = 600, width = 800, pointsize = 20)
+  
+  par(mfrow = c(1,2))
+  
+  # plot 1 shows omitted extreme values
+  plot(diff2, main = "Without Outliers")
+  plot(cv, add = TRUE)
+  
+  #plot 2 shows domestic well locations
+  plot(diff2, main = "Domestic Well Locations")
+  plot(cv, add = TRUE)
+  plot(domcv10, pch = 19, cex = 0.1, add = TRUE)
+  
+dev.off()
+```
+
+Scale drought for 1,2,4 years
+```{r}
+drought_1_yr <- drought_2_yr <- drought_3_yr <- drought_4_yr <- diff2
+
+drought_1_yr@data@values <- diff2@data@values * 0.25
+drought_2_yr@data@values <- diff2@data@values * 0.50
+drought_3_yr@data@values <- diff2@data@values * 0.75
+drought_4_yr@data@values <- diff2@data@values * 1
+
+# visualize
+drought_scenarios <- stack(drought_1_yr, drought_2_yr, 
+                           drought_3_yr, drought_4_yr)
+names(drought_scenarios) <- c("d1", "d2", "d3", "d4")
+spplot(drought_scenarios)
+
+# export
+write_rds(drought_scenarios, "drought_scenarios.rds")
+```
+
+Initial conditions kfor future drougths moving forward == mean(spring and fall 2017 GWL)
+```{r}
+# mean of spring and fall 2017 Groundwater level is t0 for future droughts
+sp_fa_2017_gwl <- mean(e[[11]], e[[12]]) 
+
+# visualize
+sp_fa_2017_gwl %>% plot()
+
+# export
+write_rds(sp_fa_2017_gwl, "sp_fa_2017_gwl.rds")
+```
+
+

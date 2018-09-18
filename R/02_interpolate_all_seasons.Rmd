@@ -1,0 +1,346 @@
+---
+title: "Interpolate Groundwater Levels for All Seasons"
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+date: 2018-06-08
+author: Rich Pauloo
+---
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  fig.width  = 7,
+  fig.height = 7,
+  collapse   = TRUE,
+  message = FALSE,
+  error = FALSE,
+  warning = FALSE,
+  cache = TRUE
+)
+```
+
+Packages used.
+```{r}
+library(here)      # for system agnostic file paths
+library(tidyverse) # general purpose data science toolkit
+library(sp)        # spatial objects
+library(raster)    # for raster objects
+library(dismo)     # for cross validation
+library(gstat)     # for kirging and idw
+library(fields)    # for thin plate spline
+```
+
+Read in all data.
+```{r}
+# shapefile names
+sn <- list.files(here("data", "spatial", "groundwater_elevation"), pattern = "\\.shp$")
+sn <- c(sn[8], sn[6], sn[7], sn[1], sn[9], sn[2], sn[10], sn[3], sn[11], sn[4], sn[12], sn[5]) # reorder
+
+# data list
+dl <- list() 
+
+# groundwater elevations as spatial points
+for(i in 1:length(sn)){
+  dl[[i]] = shapefile(here("data", "spatial", "groundwater_elevation", sn[i]))
+}
+
+# central valley alluvial basin boundary
+cv <- shapefile(here("data","spatial","central_valley_alluvial_boundary",
+                     "Alluvial_Bnd.shp"))
+
+# transform the crs of the central valley outline, and all points, to mercator
+merc <- crs(dl[[2]]) # mercator projection
+cv <- spTransform(cv, merc) # transform central valley shapefile
+cvl <- list("sp.lines", as(cv, 'SpatialLines')) # spatial lines for spplot
+
+dl <- lapply(dl, spTransform, merc) # change the crs of each points dataframe
+```
+
+Clean data.
+```{r, eval=FALSE}
+# subset pts to the central valley polygon
+subset_cv <- function(x){x[cv, ]}
+dl_cv <- lapply(dl, subset_cv) 
+#write_rds(dl_cv, "dl_cv.rds") # save data for next script
+
+# get sets of overlapping points
+get_set <- function(x, y){zerodist(x)[, y]}
+s1 <- lapply(dl_cv, get_set, 1)      # index of set 1: wells wtih an overlapping observation
+s2 <- lapply(dl_cv, get_set, 2)      # index of set 2: wells wtih an overlapping observation
+
+# get parallel minima of overlapping points
+min_list <- list()
+for(i in 1:length(s1)){
+  min_list[[i]] = pmin(dl_cv[[i]][s1[[i]],]$DGBS, dl_cv[[i]][s2[[i]],]$DGBS)
+}
+
+# replace DGBS of set 2 wells wtih average of set 1 and 2
+for(i in 1:length(s1)){
+  dl_cv[[i]][s2[[i]], "DGBS"] <- min_list[[i]]
+}
+
+# remove set 1 wells
+for(i in 1:length(s1)){
+  dl_cv[[i]] <- dl_cv[[i]][-s1[[i]], ]
+}
+
+# fix incorrect values: observations depth below groud surface > 0 
+no_neg <- function(x){x[x$DGBS > 0, ]}
+dl_cv <- lapply(dl_cv, no_neg)
+
+# log transform Depth Below Ground Surface 
+for(i in 1:length(s1)){
+  dl_cv[[i]]@data$DGBS <- log(dl_cv[[i]]@data$DGBS)
+}
+
+
+###########################################################
+
+# plot to ensure all is working
+title <- paste(c("SP","FA"), rep(2011:2017, each=2))[-c(2,4)]
+st <- sapply(dl_cv, nrow) %>% formatC(., big.mark = ",")
+for(i in 1:12){
+  plot(cv, main = title[i], sub = paste0("Spatially Unique Observations: ", st[i]))
+  plot(dl_cv[[i]], add = T, pch = 16, cex = .2, col = "red")
+}
+
+# export these plots in a nicer format
+png(filename = "observations_1.png", height = 800, width = 800, pointsize = 15)
+p <- par(mfrow=c(2,3))
+for(i in 1:6){
+  plot(cv, col = "grey90", main = title[i], sub = paste0("Spatially Unique Observations: ", st[i]))
+  plot(dl_cv[[i]], add = T, pch = 23, cex = .1, col = "blue")
+}
+par(p)
+dev.off()
+
+png(filename = "observations_2.png", height = 800, width = 800, pointsize = 15)
+p <- par(mfrow=c(2,3))
+for(i in 7:12){
+  plot(cv, col = "grey90", main = title[i], sub = paste0("Spatially Unique Observations: ", st[i]))
+  plot(dl_cv[[i]], add = T, pch = 23, cex = .1, col = "blue")
+}
+par(p)
+dev.off()
+
+# layout version
+png(filename = "observations_layout.png", height = 1600, width = 1600, pointsize = 20)
+
+  # define a layout for plots
+  layout.matrix <- matrix(1:12, nrow = 4, ncol = 3, byrow = T)
+  
+  layout(mat = layout.matrix,
+         heights = c(1,1,1,1), # Heights of the 3 rows
+         widths = c(1,1,1)) # Widths of the 4 columns
+  for(i in 1:12){
+    plot(cv, col = "grey90", main = title[i], sub = paste0("Spatially Unique Observations: ", st[i]))
+    plot(dl_cv[[i]], add = T, pch = 19, cex = .1, col = "blue")
+  }
+  
+dev.off()
+```
+
+Objects Needed by Models.
+```{r}
+r <- raster(cv)           # create a template raster to interpolate over
+res(r) <- 5000            # > township resolution: 6 miles = 9656.06 meters
+g <- as(r, "SpatialGrid") # convert raster to spatial grid object
+```
+
+IDW Optimization.
+```{r}
+# the function we want to minimize is the RMSE
+RMSE <- function(observed, predicted) {
+  sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+}
+
+# function to pass to optim
+f1 <- function(x, test, train) {
+  nmx <- x[1]                   # paramater to optimize: maxpts in neighborhood
+  idp <- x[2]                   # paramater to optimize: inverse distance power
+  if (nmx < 1) return(Inf)      # constraint: can't have < 1 pt in neighborhood
+  if (idp < .001) return(Inf)   # constraint: small idp weights far pts high
+  m <- gstat(formula=DGBS~1,    # same formulation as before
+             locations=train,   # 
+             nmax=nmx, 
+             set=list(idp=idp))
+  p <- predict(m, newdata=test, # predicted values from model m
+               debug.level=0)$var1.pred
+  RMSE(test$DGBS, p)         # function output: this is what optim minimizes
+}
+```
+
+Function for Cross Validation, IDW optimzation, Ordinary Kriging, Thin Plate Spline, and Weighted Ensemble.
+```{r}
+calculate_models <- function(d){
+  # 5-fold cross validation
+  nfolds <- 5 
+  k <- kfold(d, nfolds)
+  
+  # intalize empty vectors to fill
+  ensrmse <- idwrmse <- krigrmse <- rep(NA, 5)
+  
+  for (i in 1:nfolds) {
+    train <- d[k!=i,]   # train set (80% of data)
+    test <- d[k==i,]    # test set (20% of data)
+    
+    # optimze IDW parameters
+    opt <- optim(c(8, .5),          # initial values
+                 f1,                # function to minimize or maximize
+                 test=test,         # ... argument to be passed to f1
+                 train=train)       # ... argument to be passed to f1
+    
+    # IDW with optimum parameters
+    m1 <- gstat(formula=DGBS~1, 
+                locations=train, 
+                nmax=opt$par[1], 
+                set=list(idp=opt$par[2]))
+    p1 <- predict(m1, newdata=test, debug.level=0)$var1.pred # predict test set
+    idwrmse[i] <-  RMSE(test$DGBS, p1) # calculate error
+    
+    # ordinary kriging model specification
+    gs <- gstat(formula = DGBS ~ 1, # spatial data, so fitting xy as idp vars
+                locations = d)      # groundwater monitoring well points 
+  
+    v <- variogram(gs,              # gstat object
+                   width = 5000)    # lag distance
+  
+    fve <- fit.variogram(v,         # takes `gstatVariogram` object
+                         vgm(0.9,   # partial sill: semivariance at the range
+                             "Exp", # exponential model type
+                             100000,# range: distance where model first flattens out
+                             0.1))  # nugget
+    
+    # ordinary kriging 
+    m2 <- gstat(formula=DGBS~1, locations=train, model=fve)
+    p2 <- predict(m2, newdata=test, debug.level=0)$var1.pred # predict test set
+    krigrmse[i] <-  RMSE(test$DGBS, p2)      # calculate error
+    
+  
+    # thin plate spline
+    # m3 <- Tps(coordinates(train), train$DGBS)
+    # p3 <- predict(m3, coordinates(test)) # predict test set
+    # tpsrmse[i] <-  RMSE(test$DGBS, p3)  # calculate error
+  
+    # weighted ensemble
+    w <- c(idwrmse[i], krigrmse[i])#, tpsrmse[i]) # rmse of each method
+    weights <- w / sum(w)                       # standardize weights to 1
+    ensemble <- p1 * weights[1] +               # weight each prediction by rmse
+                p2 * weights[2] #+               
+                #p3 * weights[3] 
+    ensrmse[i] <- RMSE(test$DGBS, ensemble)     # compute weighted ensemble rmse
+  
+  }
+  
+  # IDW interpolation
+  idw <- interpolate(r, m1)                # IDW interpolation over raster
+  idw <- mask(idw, cv)                     # mask to cv
+  idw@data@values <- exp(idw@data@values)  # retransform from ln
+  # OK interpolation
+  kp <- predict(m2, g)                     # OK prediction over grid
+  kp@data$var1.pred <- exp(kp@data$var1.pred) # exponentiate the prediciton
+  kp@data$var1.var  <- exp(kp@data$var1.var)  # exponentiate the variance
+  ok <- brick(kp)                          # spatialgrid df -> raster brick obj.
+  ok <- mask(ok, cv)                       # mask to cv extent
+  names(ok) <- c('Prediction', 'Variance') # name the raster layers in brick
+  # TPS interpolation
+  # tps <- interpolate(r, m3)                # TPS interpolation over raster 
+  # tps <- mask(tps, cv)                     # get cv values
+  # tps@data@values <- exp(tps@data@values)  # exponentiate - retransform
+  # tps@data@values[tps@data@values < 0] <- 0# set TPS predctions < 0 to 0.
+  
+  # compute average RMSE for each cross-validated set
+  rmi <- mean(idwrmse)
+  rmk <- mean(krigrmse)
+  #rmt <- mean(tpsrmse)
+  rms <- c(rmi, rmk)#, rmt)
+  
+  # rmse for ensemble
+  rme <- mean(ensrmse)
+  
+  # normalize weights to 1 for comparable results, & so low rmse gets higher weight
+  weights <- ( (1/rms) / (sum(1/rms))  )  
+  s <- stack(idw, ok[[1]])#, tps)          # make raster stack object
+  ensemble <- sum(s * weights)           # create ensemble raster layer
+  
+  # create, name, and return the raster stack
+  s <- stack(idw, ok[[1]], ok[[2]], ensemble)#, tps)  # combine into one stack
+  names(s) <- c('IDW', 'OK', 'OK_var', 'Ensemble')#,'TPS') # name the layers
+  
+  # rmse
+  rmse <- data.frame(idwrmse = idwrmse, 
+                     krigrmse = krigrmse)
+  
+  # weights
+  
+  final <- list(s, rmse, weights)
+  return(final)
+}
+```
+
+Run the function over the list of spatial points data frames.
+```{r, eval = FALSE}
+set.seed(1224564) # set seed for reproducibility
+
+# apply the function over each of the seasons
+ml <- lapply(dl_cv, calculate_models)
+
+ml_raster  <- lapply(ml, function(x){x[[1]]})
+ml_rmse    <- lapply(ml, function(x){x[[2]]})
+ml_weights <- lapply(ml, function(x){x[[3]]})
+
+# save this precious r data!
+write_rds(ml_raster, "ml.rds") 
+write_rds(ml_rmse, "ml_rmse.rds") 
+write_rds(ml_weights, "ml_weights.rds") 
+```
+
+Plot and save each Ensemble.
+```{r}
+# load data
+ml <- read_rds("ml.rds")
+
+# plot the ensemble for each season
+el <- lapply(1:12, function(x) { ml[[x]]$Ensemble } ) # get list of ensemble rasters
+prefix <- sprintf("%02d", 1:12)
+title <- paste0(rep(c("SP","FA"), 7), rep(11:17, each =2))[-c(2,4)]
+
+for(i in 1:12){
+  el[[i]]@data@values[el[[i]]@data@values >= 400] <- 400  # replace large values with 400
+  el[[i]]@data@values[el[[i]]@data@values <= 0] <- 0 # replace negative values with 0
+  png(filename = paste0(prefix[i], "_", title[i],".png"))
+  print(
+    spplot(el[[i]], 
+           sp.layout = cvl, 
+           col.regions = rev(get_col_regions()),
+           main = paste(title[i], "Groundwater Depth Below Land Surface (ft)")
+           )
+    ) 
+  dev.off() 
+}
+```
+
+Examine Kriging variance.
+```{r}
+kv <- lapply(1:12, function(x) { ml[[x]]$OK_var } ) # get list of ensemble rasters
+
+for(i in 1:12){
+  #kv[[i]]@data@values[kv[[i]]@data@values >= 3500] <- 3500  # replace large values with 400
+  kv[[i]]@data@values[kv[[i]]@data@values <= 0] <- 0 # replace negative values with 0
+  png(filename = paste0(prefix[i], "_", title[i],"_KV_",".png"))
+  print(
+    spplot(kv[[i]], 
+           sp.layout = cvl, 
+           col.regions = rev(get_col_regions()),
+           main = paste(title[i], "Kriging Variance")
+           )
+    ) 
+  dev.off() 
+}
+```
+
+
