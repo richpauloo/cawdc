@@ -494,7 +494,7 @@ All data used in this study is open and publicly accessible (with the exception 
 
 ##### Machine Learning
 
-- And **ensemble machine learning classifier** was designed to **predict the failing state of wells** from **56 variables** describing monthly temperature, monthly precipitation and bioclimatic indices (e.g. mean annual temperature). The failing state of more than **36,000 wells** was derived from the spatial model to train and validate **65 initial machine learning classifiers**. The 4 most accurate classifiers were combined into a final ensemble classifier.  
+- An **ensemble machine learning classifier** was designed to **predict the failing state of wells** from **56 variables** describing monthly temperature, monthly precipitation and bioclimatic indices (e.g. mean annual temperature). The failing state of more than **36,000 wells** was derived from the spatial model to train and validate **65 initial machine learning classifiers**. The 4 most accurate classifiers were combined into a final ensemble classifier.  
 <!-- - To forecast the influence of future climate change on well failure, the ensemble classifier was applied to IPCC climate predictions for 2050 and 2070 under all 4 greenhouse gas concentration scenarios (RCP). For each year and RCP, data from up to 19 climate models was used by the ensemble classifier to predict well failure. Then, comparing the ensemble classifier's predictions to present-day predictions (2017) as a baseline, we can understand how **increasing atmospheric carbon over time affects spatial trends in well failure**. -->
 
 
