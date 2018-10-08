@@ -31,9 +31,9 @@ knitr::include_graphics("img/motivation.png")
 
 #### **BACKGROUND & MOTIVATION**
 
-- California's Central Valley is the state's most agriculturally intensive region and heavily dependent on groundwater. It is also home to nearly half of state's domestic well reliant individuals. 
+- California's Central Valley is the state's most agriculturally intensive region and heavily dependent on groundwater. It is also home to nearly half of the state's domestic well reliant individuals. 
 
-- During the 2012-2016 drought, the state received nearly 2,500 domestic wells failure reports. The majority of which were in the Central Valley, leaving thousands of people without a reliable source of drinking water, which drew [national attention ](https://www.nytimes.com/2015/06/07/business/energy-environment/california-farmers-dig-deeper-for-water-sipping-their-neighbors-dry.html){target="blank"} and [state intervention ](https://www.fresnobee.com/news/local/water-and-drought/article98224037.html){target="blank"}.  
+- During the 2012-2016 drought, the state received nearly 2,500 domestic wells failure reports, the majority of which were in the Central Valley. This left thousands of people without a reliable source of drinking water, and drew [national attention ](https://www.nytimes.com/2015/06/07/business/energy-environment/california-farmers-dig-deeper-for-water-sipping-their-neighbors-dry.html){target="blank"} and [state intervention ](https://www.fresnobee.com/news/local/water-and-drought/article98224037.html){target="blank"}.  
 
 - Hundreds of thousands to more than 1.4 million Californians rely on domestic wells for drinking water.
  
@@ -84,8 +84,8 @@ pal <- colorBin(palette = colormap(colormaps$viridis, nshades = 5),
 pal2 <- colorBin(palette = colormap(colormaps$jet, nshades = 11),
                  domain = b118cvsf$dry, bins = seq(0,660,60))
 
-pal3 <- colorBin(palette = colormap(colormaps$jet, nshades = 6),
-                 domain = b118cvsf$dens_100km2, bins = seq(0,6,1))
+pal3 <- colorBin(palette = colormap(colormaps$jet, nshades = 7),
+                 domain = b118cvsf$dens_100km2, bins = seq(0,7,1))
 
 b118cvsf %>% 
   leaflet(width = "100%") %>% 
@@ -421,7 +421,7 @@ This project was made by **function(water, data){science}**, for the 2018 [Calif
 
 - Rich Pauloo, PhD Candidate in Hydrology at UC Davis  
 - Amanda Fencl, PhD Candidate in Geography at UC Davis  
-- HervÃ© Guillon, Research Scholar at UC Davis  
+- Herv� Guillon, Research Scholar at UC Davis  
 - Alvar Escriva-Bou, Research Fellow at Public Policy Institute of California  
 
 ***  
