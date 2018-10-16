@@ -273,7 +273,7 @@ data.frame(drought_length = paste(1:4,c("yr","yrs","yrs","yrs")),
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 ```
 
-- To explore the impact of future drought on domestic well failure, a **4 year long drought was simulated** based on the **groundwater level change observed during 2012-2016**. **Intermediate droughts of 1 to 3 years** were also simulated. All simulated droughts begin *J**anuary 2018**, and assume no interventions to alleviate outages or slow groundwater level declines.  
+- To explore the impact of future drought on domestic well failure, a **4 year long drought was simulated** based on the **groundwater level change observed during 2012-2016**. **Intermediate droughts of 1 to 3 years** were also simulated. All simulated droughts begin **January 2018**, and assume no interventions to alleviate outages or slow groundwater level declines.  
 
 - Across California's Central Valley alone, a **1-4 year drought** would cause  **thousands** of domestic well failures, affecting **tens of thousands** of people.  
 
@@ -283,7 +283,7 @@ data.frame(drought_length = paste(1:4,c("yr","yrs","yrs","yrs")),
 
 - Due to differences in historical groundwater level decline, starting groundwater levels, and the distribution of well depths per region, some regions experience more than 10 times the density of well failure of other regions.
 
-- Another 4 year drought would lead to as much as 13-14 well failures per 100 square kilometers in the most adversely affected regions.
+- Another 4 year drought would lead to as much as 9-10 well failures per 100 square kilometers in the most adversely affected regions.
 
 
 ### A **future 1-4 year long drought** would affect MHI+ and (DAC + SDAC) groups similarly, but these groups will differ in their ability to cope with well failure. {data-commentary-width=400}
