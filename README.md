@@ -2,9 +2,9 @@
 
 This repo holds scripts used in the analysis submitted to the 2018 [California Water Data Challenge](http://waterchallenge.data.ca.gov/).  
 
-[The final project can be found online here](richpauloo.github.io/flexdash.html).  
+[The final project can be found online here](https://richpauloo.github.io/flexdash.html/).  
 
-[![](proj.jpg)](richpauloo.github.io/flexdash.html)  
+[![](proj.jpg)](https://richpauloo.github.io/flexdash.html/)  
 
 # TEAM
 
