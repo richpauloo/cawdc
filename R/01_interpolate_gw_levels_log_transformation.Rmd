@@ -22,9 +22,11 @@ We restrict our analysis to the Central Valley, which is a more similar hydrogeo
 
 # Assumptions and Sources of Error 
 
-We will ignore the difference between confined and unconfined aquifers, treating the entire groundwater system as one aquifer. Because monitoring well data does not indicate screened interval depths, it is nearly impossible to know if a well's measurement indicates a confined, unconfined, or semiconfined response.  
+Wells are curated by the CA-DWR to be from the unconfined to semiconfined aquifer.  
 
-We also acknowledge that well measurements are taken over a 5 month period spanning January through May, with most observations made in the months of February-April. We take these measurements to represent an seasonal average water table elevation, although the temporal quality of sampling is less than ideal.  
+We also acknowledge that well measurements are taken over a 5 month period spanning January through May, with most observations made in the months of February-April. We take these measurements to represent an seasonal average water table elevation, although the temporal quality of sampling is less than ideal.   
+
+The irregular spatial sampling will likely lead to errors in interpolation.  
 
 ***  
 
