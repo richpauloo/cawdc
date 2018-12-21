@@ -37,6 +37,7 @@ library(GISTools)  # counting points in polygons with poly.counts()
 library(raster)    # for raster objects
 library(tidyverse) # general purpose data science toolkit
 library(sp)        # spatial objects
+library(sf)
 ```
 
 # Data
@@ -57,14 +58,23 @@ dw <- spTransform(dw, merc)
 # predicted dry wells
 pdw <- read_rds(here("code","domcv5ll_dry.rds"))
 pdw <- spTransform(pdw, merc)
-pdw_1 <- read_rds(here("code","domcv5ll_dry_1.rds"))
-pdw_1 <- spTransform(pdw_1, merc)
+# pdw_1 <- read_rds(here("code","domcv5ll_dry_1.rds"))
+# pdw_1 <- spTransform(pdw_1, merc)
 
 # wells dry at t0
-dry_t0 <- read_rds("dry_at_t0.rds")
-dry_t0 <- spTransform(dry_t0, merc)
-nrow(dry_t0)
+# dry_t0 <- read_rds("dry_at_t0.rds")
+# dry_t0 <- spTransform(dry_t0, merc)
+# nrow(dry_t0)
 ```
+
+Subset to study area.
+```{r}
+b_trim_fill <- read_rds("b_trim_fill.rds")
+b_trim_fill <- spTransform(b_trim_fill, merc)
+dw <- dw[b_trim_fill, ]
+pdw <- pdw[b_trim_fill, ]
+```
+
 
 Compare obsered and predicted dry wells.
 ```{r}
@@ -75,40 +85,40 @@ plot(pdw, pch = 19, cex = 0.01, col = "red", add=T)
 
 Make pretty
 ```{r}
-library(sf)
-dwsf <-  st_as_sf(dw)
-pdw$geometry <- NULL
-pdwsf <- st_as_sf(pdw)
-cvsf <- st_as_sf(cv)
+# dwsf <-  st_as_sf(dw)
+# pdw$geometry <- NULL
+# pdwsf <- st_as_sf(pdw)
+# cvsf <- st_as_sf(cv)
+# 
+# p1 <- ggplot() +
+#   geom_sf(data = cvsf) +
+#   geom_sf(data = dwsf, alpha = 0.4, size = 0.75, color = "red") +
+#   labs(title = "Observed Dry Wells",
+#        subtitle = paste0("2012-2016 (n = ", nrow(dwsf) ,")")) +
+#   theme_minimal()
+# 
+# p2 <- ggplot() +
+#   geom_sf(data = cvsf) +
+#   geom_sf(data = pdwsf, alpha = 0.4, size = 0.75, color = "blue") +
+#   labs(title = "Predicted Dry Wells",
+#        subtitle = paste0("2012-2016 (n = ", nrow(pdwsf) ,")")) +
+#   theme_minimal()
 
-p1 <- ggplot() +
-  geom_sf(data = cvsf) +
-  geom_sf(data = dwsf, alpha = 0.4, size = 0.75, color = "red") +
-  labs(title = "Observed Dry Wells",
-       subtitle = "2012-2016 (n = 2,031)") +
-  theme_minimal()
-
-p2 <- ggplot() +
-  geom_sf(data = cvsf) +
-  geom_sf(data = pdwsf, alpha = 0.4, size = 0.75, color = "blue") +
-  labs(title = "Predicted Dry Wells",
-       subtitle = "2012-2016 (n = 2,059)") +
-  theme_minimal()
-
-#p3 <- cowplot::plot_grid(p1, p2, align = "h")
-#ggplot2::ggsave(p3, filename = "pred_obs.png", dpi = 300, height = 7, width = 11)
+# p3 <- cowplot::plot_grid(p1, p2, align = "h")
+# ggplot2::ggsave(p3, 
+#                 filename = "pred_obs.png", dpi = 300, height = 7, width = 11)
 ```
 
 ```{r}
-plot(cv)
-plot(dry_t0, pch = 19, cex = 0.01, col = "green", add=T)
+# plot(cv)
+# plot(dry_t0, pch = 19, cex = 0.01, col = "green", add=T)
 ```
 
 
 ```{r}
-plot(cv)
-plot(dw, pch = 19, cex = 0.01, col = "blue", add=T)
-plot(pdw_1, pch = 19, cex = 0.01, col = "red", add=T)
+# plot(cv)
+# plot(dw, pch = 19, cex = 0.01, col = "blue", add=T)
+# plot(pdw_1, pch = 19, cex = 0.01, col = "red", add=T)
 ```
 
 # Point Pattern Analysis: Kernel Density
@@ -124,7 +134,7 @@ cv_owin <- maptools::as.owin.SpatialPolygons(cv)
 
 # points 
 dw_pts  <- coordinates(dw)
-pdw_pts <- coordinates(pdw_1)
+pdw_pts <- coordinates(pdw)
 #dry_t0_pts <- coordinates(dry_t0)
 
 # create ppp objects
@@ -261,6 +271,7 @@ plot(cv, add=T)
 # histogram of difference
 data.frame(x = (pds-ods)$v %>% as.vector()) %>% 
   ggplot() +
+  #geom_histogram(aes(x)) +
   geom_density(aes(x)) + 
   geom_vline(aes(xintercept = 0.65)) + 
   geom_vline(aes(xintercept = -0.65))
@@ -301,7 +312,7 @@ rel_diff <- pdwr - dwr
 
 Compare predicted and observed. 
 ```{r}
-# amke into data frames
+# make into data frames
 dwr_df  <- as.data.frame(dwr, xy = TRUE)
 pdwr_df <- as.data.frame(pdwr, xy = TRUE)
 
@@ -316,6 +327,7 @@ lab  <- c("0.00 to 0.20","0.20 to 0.40","0.40 to 0.60","0.60 to 0.80", "0.80 to 
 dwr_df$bin  <- base::cut(dwr_df$layer,  breaks = seq(0, 1, 0.2), labels = lab)
 pdwr_df$bin <- base::cut(pdwr_df$layer, breaks = seq(0, 1, 0.2), labels = lab)
 
+library(colormap)
 pal  <- colormap(colormaps$jet, nshades = 10, alpha = .7)[6:10]
 pal[1] <- "#ffffff"
 
@@ -326,12 +338,13 @@ p_obs_map <- dwr_df %>%
   geom_path(data = cv_df, aes(long, lat, group = group)) +
   coord_fixed(1.1) +
   theme_void() +
-  labs(fill = "Probability",
-       title = "Observed Log Weighted Kernel Density Estimate",
-       subtitle = "Spring 2012 - Fall 2016") +
+  # labs(fill = "Probability",
+  #      title = "Observed Log Weighted Kernel Density Estimate",
+  #      subtitle = "Spring 2012 - Fall 2016") +
   scale_fill_manual(values = pal,
                     breaks = rev(lab),
-                    labels = rev(lab))
+                    labels = rev(lab)) +
+  guides(fill = FALSE)
   
 # predicted
 p_pred_map <- pdwr_df %>% 
@@ -340,12 +353,13 @@ p_pred_map <- pdwr_df %>%
   geom_path(data = cv_df, aes(long, lat, group = group)) +
   coord_fixed(1.1) +
   theme_void() +
-  labs(fill = "Probability",
-       title = "Predicted Log Weighted Kernel Density Estimate",
-       subtitle = "Spring 2012 - Fall 2016") +
+  # labs(fill = "Probability",
+  #      title = "Predicted Log Weighted Kernel Density Estimate",
+  #      subtitle = "Spring 2012 - Fall 2016") +
   scale_fill_manual(values = pal,
                     breaks = rev(lab),
-                    labels = rev(lab))
+                    labels = rev(lab))+
+  guides(fill = FALSE)
 
 # histograms
 p_obs_pred_dens <- rbind.data.frame(dwr_df %>% mutate(type = "Observed"), 
@@ -359,10 +373,50 @@ p_obs_pred_dens <- rbind.data.frame(dwr_df %>% mutate(type = "Observed"),
        fill = "") +
   theme(legend.position = "bottom")
 
-top <- cowplot::plot_grid(p_obs_map, p_pred_map)
-p_kernel_grid <- cowplot::plot_grid(top, p_obs_pred_dens, align = "v", axis = "l", ncol = 1)
+# top <- cowplot::plot_grid(p_obs_map, p_pred_map)
+
+# p_kernel_grid <- cowplot::plot_grid(top, p_obs_pred_dens, align = "v", axis = "l", ncol = 1)
 #ggsave(p_kernel_grid, filename = "p_kernel_grid.png", height = 7, width = 11, dpi = 300)
+
+# ggplot2::ggsave(top, filename="obs_pred_dens.png", dpi = 300, height = 7, width = 11)
 ```
+
+Figure for publication. pred obs point patterns
+```{r}
+p1 <- ggplot() +
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  geom_point(data = as.data.frame(dw_pts), aes(coords.x1,coords.x2), alpha = 0.4, size = 0.75, color = "red") +
+  coord_fixed(1.1) +
+  theme_void()
+
+p2 <- ggplot() +
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  geom_point(data = as.data.frame(pdw_pts), aes(dom.lon,dom.lat), alpha = 0.4, size = 0.75, color = "blue") +
+  coord_fixed(1.1) +
+  theme_void()
+
+# p3 <- cowplot::plot_grid(p1, p2, align = "h")
+
+
+po <- cowplot::plot_grid(p1, p_obs_map, p2, p_pred_map, labels = c("(A)","(B)","(C)","(D)"))
+
+# ggsave(po, filename = "p_o_kernels.pdf", height = 10.5, width = 7.5, device = cairo_pdf)
+legend_for_ai <- pdwr_df %>% 
+  ggplot() +
+  geom_raster(aes(x,y, fill = bin)) + 
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  coord_fixed(1.1) +
+  theme_void() +
+  # labs(fill = "Probability",
+  #      title = "Predicted Log Weighted Kernel Density Estimate",
+  #      subtitle = "Spring 2012 - Fall 2016") +
+  scale_fill_manual(values = pal,
+                    breaks = rev(lab),
+                    labels = rev(lab))
+# ggsave(legend_for_ai, filename = "legend_for_ai.png", dpi = 300, height = 7, width = 7)
+
+```
+
 
 Compare difference of rasters.
 ```{r}
@@ -370,9 +424,9 @@ library(colormap)
 diff_df <- as.data.frame(abs_diff, xy = TRUE) 
 rel_df <- as.data.frame(rel_diff, xy = TRUE) 
 
-lab  <- c("0.00 to 0.20","0.20 to 0.40","0.40 to 0.60","0.60 to 0.80", "0.80 to 1.00")
-lab2 <- c("-0.80 to -1.00","-0.60 to -0.80","-0.40 to -0.60","-0.20 to -0.40", "0.00 to -0.20",
-          "0.00 to 0.20","0.20 to 0.40","0.40 to 0.60","0.60 to 0.80", "0.80 to 1.00")
+lab  <- c("0.00 to 0.20","0.21 to 0.40","0.41 to 0.60","0.61 to 0.80", "0.81 to 1.00")
+lab2 <- c("-0.81 to -1.00","-0.61 to -0.80","-0.41 to -0.60","-0.21 to -0.40", "0.00 to -0.20",
+          "0.00 to 0.20","0.21 to 0.40","0.41 to 0.60","0.61 to 0.80", "0.81 to 1.00")
 
 diff_df$bin  <- base::cut(diff_df$layer, breaks = seq(0, 1, 0.2), labels = lab)
 rel_df$bin2 <- base::cut(rel_df$layer, breaks = seq(-1, 1, 0.2), labels = lab2)
@@ -388,10 +442,10 @@ p_abs_map <- diff_df %>%
   geom_raster(aes(x,y, fill = bin)) +
   geom_path(data = cv_df, aes(long, lat, group = group)) +
   coord_fixed(1.1) +
-  theme_void() +
-  labs(fill = "|difference|",
-       title = "|Predicted - Observed| Kernel Density Estimates",
-       subtitle = "Spring 2012 - Fall 2016") +
+  theme_void(base_size = 15) +
+  labs(#title = "|Predicted - Observed| Kernel Density Estimates",
+       #subtitle = "Spring 2012 - Fall 2016",
+       fill = "|Difference|") +
   scale_fill_manual(values = pal,
                     breaks = rev(lab),
                     labels = rev(lab))
@@ -401,10 +455,10 @@ p_rel_map <- rel_df %>%
   geom_raster(aes(x,y, fill = bin2)) +
   geom_path(data = cv_df, aes(long, lat, group = group)) +
   coord_fixed(1.1) +
-  theme_void() +
-  labs(fill = "difference",
-       title = "Predicted - Observed Kernel Density Estimates",
-       subtitle = "Spring 2012 - Fall 2016") +
+  theme_void(base_size = 15) +
+  labs(#title = "Predicted - Observed Kernel Density Estimates",
+       #subtitle = "Spring 2012 - Fall 2016",
+       fill = "Difference") +
   scale_fill_manual(values = pal2,
                     breaks = lab2,
                     labels = rev(lab2))
@@ -414,9 +468,9 @@ p_rel_map <- rel_df %>%
 p_abs_dens <- diff_df %>% 
   ggplot(aes(layer)) +
   geom_density(fill = '#619CFF', alpha=0.6) + 
-  theme_minimal() +
-  labs(title = '|Predicted - Observed| Kernel Density Estimates',
-       subtitle = "Spring 2012 - Fall 2016", 
+  theme_minimal(base_size = 15) +
+  labs(#title = '|Predicted - Observed| Kernel Density Estimates',
+       #subtitle = "Spring 2012 - Fall 2016", 
        x = "|Difference|", y = "Density")
 
 
@@ -443,15 +497,15 @@ p_rel_dens <- ggplot() +
   geom_vline(xintercept=meanx) +
   geom_vline(xintercept=medx, color='#FFFFFF') +
   geom_density(data = rel_df, aes(x = layer, y = ..density..)) +
-  theme_minimal() +
-  labs(title = "Predicted - Observed Kernel Density Estimates",
-       subtitle = "Spring 2012 - Fall 2016",
+  theme_minimal(base_size = 15) +
+  labs(#title = "Predicted - Observed Kernel Density Estimates",
+       #subtitle = "Spring 2012 - Fall 2016",
        x = "Difference", y = "Density") 
   
 
 p_kernel_diff_grid <- cowplot::plot_grid(p_abs_map, p_abs_dens, p_rel_map, p_rel_dens,
                                     labels = c("(A)","","(B)",""))
-#ggsave(p_kernel_diff_grid, filename = "p_kernel_diff_grid.png", dpi = 300, width = 11, height = 7)
+# ggsave(p_kernel_diff_grid, filename = "p_kernel_diff_grid.pdf", device = cairo_pdf, width = 11, height = 7)
 ```
 
 

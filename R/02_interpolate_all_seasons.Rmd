@@ -97,6 +97,8 @@ for(i in 1:length(s1)){
   dl_cv[[i]]@data$DGBS <- log(dl_cv[[i]]@data$DGBS)
 }
 
+# save for 10_space_time_kriging
+#write_rds(dl_cv, "dl_cv_log_trans.rds")
 
 ###########################################################
 
@@ -294,9 +296,9 @@ ml_rmse    <- lapply(ml, function(x){x[[2]]})
 ml_weights <- lapply(ml, function(x){x[[3]]})
 
 # save this precious r data!
-write_rds(ml_raster, "ml.rds") 
-write_rds(ml_rmse, "ml_rmse.rds") 
-write_rds(ml_weights, "ml_weights.rds") 
+# write_rds(ml_raster, "ml.rds") 
+# write_rds(ml_rmse, "ml_rmse.rds") 
+# write_rds(ml_weights, "ml_weights.rds") 
 ```
 
 Plot and save each Ensemble.
@@ -341,6 +343,88 @@ for(i in 1:12){
     ) 
   dev.off() 
 }
+```
+
+
+Plots for seasonal gw level
+```{r}
+# mask to truncated 5km domestic well buffer
+b_trim_fill <- read_rds("b_trim_fill.rds")
+b_trim_fill <- spTransform(b_trim_fill, crs(ml[[1]]))
+ml <- lapply(ml, mask, b_trim_fill) # mask each of the gwl predictions to the trimmed buffer
+
+# plot the ensemble for each season
+el <- lapply(1:12, function(x) { ml[[x]]$Ensemble } ) # get list of ensemble rasters
+prefix <- sprintf("%02d", 1:12)
+title <- paste0(rep(c("SP","FA"), 7), rep(11:17, each =2))[-c(2,4)]
+
+# for(i in 1:12){
+#   el[[i]]@data@values[el[[i]]@data@values >= 400] <- 400  # replace large values with 400
+#   el[[i]]@data@values[el[[i]]@data@values <= 0] <- 0 # replace negative values with 0
+#   png(filename = paste0(prefix[i], "_", title[i],".png"))
+#   print(
+#     spplot(el[[i]], 
+#            sp.layout = cvl, 
+#            col.regions = rev(get_col_regions()),
+#            main = paste(title[i], "Groundwater Depth Below Land Surface (ft)")
+#            )
+#     ) 
+#   dev.off() 
+# }
+# 
+# #
+# for(i in 1:12){
+#   p <- data.frame(x = el[[i]]@data@values) %>% 
+#     ggplot(aes(x)) +
+#     geom_density() +
+#     labs(title = paste(title[i], "Groundwater Depth Below Land Surface (ft)")) +
+#     coord_cartesian(ylim = c(0, 0.01), xlim = c(0, 650))
+#  ggsave(p, filename = paste0(formatC(i, width = 2, flag = "0"), title[i],".png"))
+# }
+
+# boxplot of spring to fall GW depth below land surface relationships
+l <- list()
+for(i in 1:12){
+  l[[i]] <- data.frame(t = title[i],
+                       v = el[[i]]@data@values)
+}
+
+ldf <- do.call(rbind.data.frame, l) %>% filter(!is.na(v))
+ldf$season <- grepl(ldf$t, pattern= "SP")
+ldf$season <- ifelse(ldf$season == TRUE, "Spring", "Fall")
+
+gw_boxplots_sp_fall <- ldf %>% 
+  mutate(v = -1*v*0.3048) %>%  # convert feet to meters, and make negative
+  ggplot(aes(t, v)) +
+  geom_boxplot(outlier.shape = NA, coef = 0, aes(fill = season), alpha = 0.5) +
+  coord_cartesian(ylim = c(-47,0)) +
+  # scale_fill_viridis_d(option = "viridis") +
+  scale_fill_manual(values = rev(colormap(colormaps$viridis, nshades=2))) +
+  labs(x = "Time", y = "Depth to groundwater (m)", fill = "Season") +
+  theme_set(theme_minimal(base_size = 16)) + theme(legend.position = "bottom")
+
+gw_boxplots_sp_fall
+# save
+ggsave(gw_boxplots_sp_fall, filename = "gw_boxplots_sp_fall.pdf", device = cairo_pdf)
+```
+Plot Spring 2012 and Fall 2016 GWL.
+```{r}
+# the study area buffer
+library(sf)
+b_trim_fill <- read_rds("b_trim_fill.rds")
+bsf  <- st_as_sf(b_trim_fill)
+cvsf <- st_as_sf(cv) 
+dsf  <- st_as_sf(domcv6)
+pdsf <- st_geometry(dsf)
+
+# plot
+p <- ggplot() + 
+  geom_sf(data = cvsf, color = "grey50") +
+  geom_sf(data = bsf, fill = "#fde725ff", alpha = 0.7) +
+  coord_sf(datum=NA) + 
+  theme_void()
+
+#ggsave(p, filename = "test.pdf", device = cairo_pdf, height = 4, width = 8)
 ```
 
 

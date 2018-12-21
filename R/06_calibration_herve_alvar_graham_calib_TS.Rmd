@@ -57,6 +57,7 @@ cv <- spTransform(cv, merc)
 
 # load data 
 domcv6 <- read_rds("domcv6_mean_gw_with_beta.rds")
+domcv6 <- spTransform(domcv6, merc)
 
 # make new sampling grid, with resolution = 9 townships
 cvr <- raster(cv)
@@ -85,9 +86,11 @@ Load Central Valley, domestic well failures (test set), and active domestic well
 
 # gsa shapefile in central valley
 gsacv <- read_rds("gsacv.rds")
+gsacv <- spTransform(gsacv, merc)
 
 # bulletin 118 shapefile in central valley
 b118cv <- read_rds("b118cv.rds")
+b118cv <- spTransform(b118cv, merc)
 
 # read cleaned test data and transform to mercator
 dw <- shapefile(here("data", "dry_wells", "cleaned_dw", "dwcv.shp"))
@@ -95,12 +98,30 @@ dw <- spTransform(dw, merc)
 
 # read in water level data
 ml <- read_rds("ml.rds")
+ml <- lapply(ml, projectRaster, crs = merc)
+```
 
-# baseline water level defined by the spring measurements
+Subset observed data, OSWCR data, and groundwater interpolations to the domestic well buffer study area.
+```{r}
+# mask to truncated 5km domestic well buffer
+b_trim_fill <- read_rds("b_trim_fill.rds")
+b_trim_fill <- spTransform(b_trim_fill, merc)
+ml <- lapply(ml, mask, b_trim_fill) # mask each of the gwl predictions to the trimmed buffer
+
+# subset observed wells to study area (go from n=2031 -> n=2027)
+dw <- dw[b_trim_fill, ]
+
+# subset domestic well data frame to only include study area (n=95228 -> n=94925)
+domcv6 <- domcv6[b_trim_fill, ]
+```
+
+Boundary conditions for initial groundwater level in Spring 2011.
+```{r}
+# baseline water level defined by the spring 2011 measurements
 baseline <- ml[[1]]$Ensemble
 
 # with spplot
-# spplot(baseline, 
+# spplot(baseline,
 #        col.regions = rev(get_col_regions()),
 #        main = "Spring 2011 Groundwater Depth Below Land Surface")
 
@@ -114,6 +135,38 @@ as.data.frame(baseline, xy = TRUE) %>%
        title = "Groundwater Depth Below Land Surface",
        subtitle = "Spring 2011") +
   scale_fill_continuous(type = "viridis", na.value="transparent")
+
+# plot SP 2012 and FA 2016 for publication
+library(colormap)
+library(viridis)
+
+# mean(SP11,SP12) and mean(FA15,FA16) ensembles converted to meters, turned into dfs, fitered for non-NA vals
+df1 <- filter(as.data.frame(((ml[[1]]$Ensemble + ml[[2]]$Ensemble)/2)*0.3048, xy=TRUE), !is.na(layer)) %>%
+  rename(Ensemble = layer) %>%  
+  mutate(Ensemble = ifelse(Ensemble >=100, 100, Ensemble), season = "Avg(ASP11,SP12)")
+df2 <- filter(as.data.frame(((ml[[8]]$Ensemble + ml[[10]]$Ensemble)/2)*0.3048, xy=TRUE), !is.na(layer))  %>%
+  rename(Ensemble = layer) %>%  
+  mutate(Ensemble = ifelse(Ensemble >=100, 100, Ensemble), season = "Avg(FA16,FA17)")
+df3 <- rbind.data.frame(df1, df2)
+
+p <- ggplot() + 
+  geom_raster(data=df3, 
+              aes(x,y,fill = Ensemble)) +
+  geom_path(data = cv, 
+            aes(long, lat, group = group)) + 
+  geom_path(data = b_trim_fill, 
+            aes(long, lat, group = group)) +
+  scale_fill_viridis(option = "plasma") +
+  coord_fixed(1.1) +
+  labs(fill = "g (m)") +
+  facet_wrap(~season) +
+  theme_void() +
+  theme(strip.text.x = element_blank())
+
+p
+
+# save 
+#ggsave(p, filename = "sp_fa_gwl.pdf", device = cairo_pdf, height = 8, width = 16)
 ```
 
 
@@ -133,18 +186,17 @@ domcv6@data <- domcv6@data %>%
   mutate(dry = ifelse(Ensemble > pump_loc, TRUE, FALSE)) # wells dry in SP 2011
 
 # save wells dry at start of simulation for analysis later
-dry_at_t0 <- domcv6[domcv6@data$dry == TRUE &  # remove wells dry at start of model
-                    domcv6@data$year < 2012, ] # remove wells not in study period (> 2016)
-
-write_rds(dry_at_t0, "dry_at_t0.rds")
+# dry_at_t0 <- domcv6[domcv6@data$dry == TRUE &  # remove wells dry at start of model
+#                     domcv6@data$year < 2012, ] # remove wells not in study period (> 2016)
+# 
+# write_rds(dry_at_t0, "dry_at_t0.rds")
 
 # remove wells that are already dry, about 20% of data
+domcv6 <- domcv6[!is.na(domcv6$dry), ]       # remove 8 wells with dry = NA b/c they fall out of bounds
 domcv6 <- domcv6[domcv6@data$dry == FALSE &  # remove wells dry at start of model
                  domcv6@data$year <= 2016, ] # remove wells not in study period (> 2016)
 
 # re-transform
-domcv6 <- spTransform(domcv6, merc)
-
 # make a copy for the optimization
 domcv9 <- domcv8 <- domcv6
 
@@ -184,7 +236,7 @@ We calculate the distribution of failure proportions given well failure data fro
 
 ```{r}
 # retirement age
-ret_age <- 28
+ret_age <- 28 # obtain from the minimum SSE grid search loop over retirement ages
 
 cutoff <- 2016 - ret_age
 
@@ -237,10 +289,14 @@ calibration_wet <- wr_counts[fr >= quart[1] & fr <= quart[2] & !is.nan(fr)]
 
 calibration_poly$test <- calibration_fr
 spplot(calibration_poly, "test", main = "Failure Rates at Calibration Townships")
+```
 
+```{r}
 plot(cv)
 plot(calibration_poly, add=T)
+plot(b_trim_fill, add=T)
 ```
+
 
 ## OSWCR Reporting
 
@@ -264,6 +320,8 @@ data.frame(x = oswcr_in_calibration) %>%
        subtitle = "Calibration Townships: 1996-2012",
        x = "Number of Domestic Wells", y = "Count") 
 
+# calibration 
+
 # subset the calibration polygons to remove low OSWCR count polygons
 calibration_poly2 <- calibration_poly[oswcr_in_calibration >= quart2[1] &
                                       oswcr_in_calibration <= quart2[2], ]
@@ -278,25 +336,8 @@ calibration_fr2 <- calibration_fr[oswcr_in_calibration >= quart2[1] &
 # calibration_poly2 <- calibration_poly2[!names(calibration_fr2) %in% bad, ]
 ```
 
-Final polygons used in the validation set. 
-```{r}
-plot(calibration_poly2, main = "Validation Townships/Observations")
-points(dw[calibration_poly2, ], pch = 19, cex = 0.5, col = "blue")
 
-spplot(calibration_poly2, "test", main = "Failure Rate")
-
-plot(cv)
-plot(calibration_poly, add=T)
-
-plot(cv)
-plot(calibration_poly2, add=T)
-
-plot(cv)
-points(dw, pch = 19, cex = 0.01, col = "blue")
-plot(calibration_poly2, add=T)
-```
-
-Remove calibration areas with n <= x
+Remove calibration areas with n <= 20.
 ```{r}
 # count validation data in calibration polygons
 dw_in_calibration_poly <- poly.counts(dw, calibration_poly2)
@@ -312,6 +353,29 @@ calibration_poly2 <- calibration_poly2[dw_in_calibration_poly >= min_n, ]
 calibration_fr2   <- calibration_fr2[dw_in_calibration_poly >= min_n ]
 ```
 
+Final polygons used in the validation set. 
+```{r}
+plot(cv)
+plot(calibration_poly2, main = "Validation Townships/Observations", add=T)
+points(dw[calibration_poly2, ], pch = 19, cex = 0.5, col = "blue")
+plot(b_trim_fill, add=T)
+
+spplot(calibration_poly2, "test", main = "Failure Rate")
+
+plot(cv)
+plot(calibration_poly, add=T)
+plot(b_trim_fill, add=T)
+
+plot(cv)
+plot(calibration_poly2, add=T)
+plot(b_trim_fill, add=T)
+
+
+plot(cv)
+points(dw, pch = 19, cex = 0.01, col = "blue")
+plot(calibration_poly2, add=T)
+plot(b_trim_fill, add=T)
+```
 
 
 
@@ -380,15 +444,15 @@ calib <- data.frame(obs = log(calibration_fr2*100), pred = log(frp*100)) %>%
   geom_point() +
   geom_abline(slope = 1, linetype = "dashed") +
   coord_cartesian(ylim = c(0.25,3.75), xlim = c(0.25,3.75)) + 
-  theme_minimal() +
-  labs(title = "Naive Model",
-       subtitle = paste0("Observed v. Predicted Failure Rates (n validation areal units = ",
-                         length(calibration_fr2), ")"),
-       x = "log(Observed Failure)", y = "log(Predicted Failure)")
+  theme_minimal(base_size = 15) +
+  labs(#title = "Naive Model",
+       #subtitle = paste0("Observed v. Predicted Failure Rates (n validation areal units = ",
+                         #length(calibration_fr2), ")"),
+       x = "ln(Observed Failure)", y = "ln(Predicted Failure)")
 
 calib
 
-ggplot2::ggsave(calib, filename = "calib.png", dpi = 300, height = 7, width = 11)
+ggplot2::ggsave(calib, filename = "calib.pdf", device = cairo_pdf, height = 5, width = 8)
 ```
 
 ```{r}
@@ -451,7 +515,7 @@ SSE <- function(observed, predicted) {
 ret_age <- seq(20, 40, 1)
 
 # results list to fill
-result_list <- list()
+result_list <- vector("list", length = length(ret_age))
 
 for(i in 1:length(ret_age)){
 
@@ -554,13 +618,25 @@ var3 <- lapply(result_list, function(x){x$n_dry}) %>% do.call(c, .)
 df <- data.frame(ret_age = ret_age, error = var2, n_dry = var3)
 
 p1 <- ggplot(df) +
-  geom_point(aes(ret_age, error))
+  geom_point(aes(ret_age, error), size = 2,
+             color = c(rep("black", 8), "red", rep("black", 12))) +
+  theme_minimal(base_size = 16) +
+  labs(x = "Retirement age (yrs)", y = "SSE", title = "")
   
 p2 <- ggplot(df) +
-  geom_point(aes(ret_age, n_dry)) +
-  geom_hline(yintercept = 2000)
+  geom_point(aes(ret_age, n_dry), size = 2,
+             color = c(rep("black", 8), "red", rep("black", 12))) +
+  geom_hline(yintercept = 2031) + # observed dry wells in 2012-2016 drought
+  theme_minimal(base_size = 16) +
+  labs(x = "Retirement age (yrs)", y = "Dry well count", title = "")
 
-cowplot::plot_grid(p1, p2)
+p_calib_err <- cowplot::plot_grid(p1, p2, labels = c("(A)", "(B)"))
+p_calib_err
+
+# save
+# ggplot2::ggsave(p_calib_err, 
+#                 filename = here("code","00_figures","p_calib_err.pdf"),
+#                 height = 6, width = 10, device = cairo_pdf)
 ```
 
 Retirement age of 28 years gives the lowest SSE. Go back to top and plug this in.
@@ -710,7 +786,7 @@ domcv <- domcv[domcv@data$dry == FALSE &  # remove wells dry at start of model
                domcv@data$year <= 2016, ] # remove wells not in study period (> 2016)
   
 # apply water level scaling factor and extract level for each of point
-emax <- mean(es) * .97 # mean groundwater depth below land surface 
+emax <- mean(es) * 1 # mean groundwater depth below land surface 
 names(emax) <- "max_gw" # change the name of the raster layer
   
 # extract the raster max gw level values and bind to spatial points dataframe
@@ -1215,9 +1291,6 @@ domcv5ll <- spTransform(domcv3, crs("+proj=longlat +datum=WGS84 +no_defs +ellps=
 domcv5ll$bot <- round(domcv5ll$bot, 2)
 
 # icons for points
-icons <- icons(
-  
-)
 
 # function to get colors
 getColor <- function(d) {
@@ -1595,8 +1668,9 @@ Export for flexdashboard.
 # simplify the GSA
 library(rmapshaper)
 gsacvsf_simp  <- gsacvsf %>% ms_simplify(keep_shapes = TRUE)
+b118cvsf_simp  <- b118cvsf %>% ms_simplify(keep_shapes = TRUE)
 
-write_rds(b118cvsf, "b118cvsf.rds")
+write_rds(b118cvsf_simp, "b118cvsf.rds")
 write_rds(gsacvsf_simp, "gsacvsf_simp.rds")
 write_rds(domcv5ll, "domcv5ll.rds")
 write_rds(icons_dry, "icons_dry.rds")

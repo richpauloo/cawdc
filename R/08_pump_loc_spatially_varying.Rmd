@@ -211,29 +211,39 @@ p4 <- test %>%
   ggplot() + 
   geom_histogram(aes(bot)) 
 
-cowplot::plot_grid(p1,p2,p3,p4)
+# cowplot::plot_grid(p1,p2,p3,p4)
 
 
 
 p_tuning_param <- test %>%
   group_by(Subbasin_N) %>% 
-  mutate(mean_d = mean(pump_loc), 
+  mutate(pump_loc = pump_loc * 0.3048, # convert feet to meters
+         mean_d = mean(pump_loc), 
          n = n()) %>% 
-  filter(n >= 10) %>% 
+  filter(n >= 50 & ! Subbasin_N %in% c("SOLANO", "YOLO"))  
+
+p <- p_tuning_param %>%   
   ggplot() +
   geom_density(aes(pump_loc), alpha = 0.1, fill="grey50", color="grey50") +
   facet_wrap(~Subbasin_N) + 
   geom_vline(aes(xintercept = mean_d), color = "red") +
-  geom_text(aes(x = mean_d + 50, y = .012, 
-                label = paste0("mean=",round(mean_d,2)))) +
-  geom_text(aes(x = mean_d + 50, y = .015, 
-                label = paste0("n=",n))) +
-  theme_minimal() +
-  coord_cartesian(xlim = c(0,600)) +
-  labs(title = "Density of Pump Location", y= "Density",
-       subtitle = "Pump depth infered as mean of Static Water Level and Top of Well Screen")
+  # geom_text(aes(x = mean_d + 15, y = .012, 
+  #               label = paste0("mean=",round(mean_d,2)))) +
+  geom_text(aes(x = 0.5*(min(p_tuning_param$pump_loc) + max(p_tuning_param$pump_loc)), y = 0.05, vjust = 1,
+                label = paste0("n = ",n," \n ","\u00b5", " = ",round(mean_d,2)))) +
+  # annotate("text", 
+  #          label = paste0("mean=",round(p_tuning_param$mean_d,2), "\n", "n=", p_tuning_param$n), 
+  #          x = 0.5*(min(p_tuning_param$pump_loc) + max(p_tuning_param$pump_loc)), y = 0.05, vjust = 1) +
+  theme_bw(base_size = 15) +
+  coord_cartesian(xlim = c(0,160)) +
+  # labs(title = "Density of Pump Location", y= "Density",
+  #      subtitle = "Pump depth infered as mean of Static Water Level and Top of Well Screen")
+  labs(x = expression(z~(m)), y = expression(rho))
 
-ggsave(p_tuning_param, filename="pump_loc_density.png", dpi = 300, height = 7, width = 11)
+p
+
+# ggsave(p, filename="pump_loc_density.png", dpi = 300, height = 7, width = 11)
+# ggsave(p, filename="pump_loc_density.pdf", device = cairo_pdf, height = 7, width = 11)
 
 # mean pump_loc per subbasin
 test %>% 
@@ -252,28 +262,35 @@ test %>%
 # visualize
 p_pump_loc_bot <- test %>% 
   group_by(Subbasin_N) %>% 
-  mutate(n = n()) %>% 
+  mutate(bot      = bot      * 0.3048, # convert ft to meters
+         pump_loc = pump_loc * 0.3048, # convert ft to meters
+         n = n()) %>% 
   filter(n >= 50) %>% 
   ungroup() %>% 
+  filter(!Subbasin_N %in% c("SOLANO", "YOLO")) %>% 
   ggplot(aes(log(pump_loc), log(bot))) +
-  geom_point() +
-  geom_smooth(method = "lm", level = 0.99) +
-  geom_smooth(method = "lm", level = 0.95) +
-  geom_smooth(method = "lm", level = 0.65) +
+  geom_point(alpha = 0.4) +
+  # geom_smooth(method = "lm", level = 0.99) +
+  # geom_smooth(method = "lm", level = 0.95) +
+  # geom_smooth(method = "lm", level = 0.65) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
   facet_wrap(~Subbasin_N) +
-  theme_minimal() +
-  labs(title = "Spatial Dependency of Pump Location",
-       subtitle = "B118 Basins with n >= 50",
-       y = "log(pump location)", x = "log(screen bottom)")
+  theme_bw(base_size = 15) +
+  # labs(title = "Spatial Dependency of Pump Location",
+  #      subtitle = "B118 Basins with n >= 50",
+  #      y = "log(z)", x = "log(screen bottom)")
+  labs(x = expression(ln(z[b])), y = expression(ln(z)))
 
 p_pump_loc_bot
 
-ggplot2::ggsave(p_pump_loc_bot, filename = "p_pump_loc_bot.png", dpi = 300, height = 7, width = 11)
+# ggplot2::ggsave(p_pump_loc_bot, filename = "p_pump_loc_bot.pdf", device = cairo_pdf, height = 7, width = 11)
 
 # export lm coefficients
 lms <- test %>% 
   group_by(Subbasin_N) %>% 
-  mutate(n = n()) %>% 
+  mutate(bot      = bot      * 0.3048, # convert ft to meters
+         pump_loc = pump_loc * 0.3048, # convert ft to meters
+         n = n()) %>% 
   filter(n >= 50) %>% 
   base::split(.$Subbasin_N) %>% 
   lapply(., function(x){return(summary(lm(log(pump_loc) ~ log(bot), data = x)))}) 
@@ -281,7 +298,9 @@ lms <- test %>%
 # log-log linear model between bottom (which we have for most all wells) and pump_location!
 pl_lm <- data.frame(Subbasin_N = names(lms),
                   b0 = lapply(lms, function(x){return(coef(x)[1])}) %>% do.call(rbind, .),
-                  b1 = lapply(lms, function(x){return(coef(x)[2])}) %>% do.call(rbind, .))
+                  b1 = lapply(lms, function(x){return(coef(x)[2])}) %>% do.call(rbind, .),
+                  r2 = lapply(lms, function(x){return(x$r.squared)}) %>% do.call(rbind, .),
+                  n  = lapply(lms, function(x){return(x$df[2])}) %>% do.call(rbind, .))
 
 rownames(pl_lm) <- NULL
 write_rds(pl_lm, "pl_lm.rds") # export
@@ -300,6 +319,9 @@ hold <- test %>%
 hold
 
 b118cv[b118cv$Subbasin_N %in% hold, ] %>% plot()
+
+# plot of which basins have > 75 samples, and which do not
+b118cv@data$with_beta <- ifelse(b118cv$Subbasin_N %in% hold, TRUE, FALSE)
 ```
 
 For subbasins with **missing** data, create a north-south model to impute their pump_location.
@@ -318,27 +340,123 @@ no_beta_south  <- no_beta[c(1,2)]  # south
 with_beta_north <- c("COSUMNES","NORTH AMERICAN","COLUSA","YOLO","SOLANO")
 with_beta_south <- c("DELTA-MENDOTA","CHOWCHILLA","TULARE LAKE")
 
-# visualize
+
+# visualize maps
+# add classes to ploygons, indicating if they have 75 samples, and if they're north or south
+b118cv@data <- mutate(b118cv@data, 
+                      class = case_when(Subbasin_N %in% no_beta_north ~ "n < 75 (North)",
+                                        Subbasin_N %in% no_beta_south ~ "n < 75 (South)"))
+b118cv$class[is.na(b118cv$class)] <- "n > 75"
+
+# convert to sf and plot
+b118cvsf <- st_as_sf(b118cv)
+p <- ggplot(b118cvsf) +
+  geom_sf(aes(fill= class), alpha = 0.5) + 
+  scale_fill_viridis_d() +
+  theme_minimal() + 
+  theme(legend.justification = c(1, 1), 
+        legend.position = c(1, 1)) +
+  labs(fill = NULL)
+  
+p  
+
+# map of subbasins used for north/south models, plus the points within those subbasins
+domcv6 <- read_rds("domcv6_mean_gw_with_beta.rds")
+domcv6sf <- st_as_sf(domcv6)
+domcv6sf_n <- domcv6sf %>% filter(Subbasin_N %in% with_beta_north) %>% filter(!is.na(bot) & !is.na(StaticWaterLevel))
+domcv6sf_s <- domcv6sf %>% filter(Subbasin_N %in% with_beta_south) %>% filter(!is.na(bot) & !is.na(StaticWaterLevel))
+
+# north plot
+library(colormap)
+pn <- b118cvsf %>% mutate(n = ifelse(Subbasin_N %in% with_beta_north, T, F)) %>% 
+  ggplot() + 
+  geom_sf(aes(fill = n)) + 
+  scale_fill_manual(values = c("grey90", colormap(colormaps$viridis, nshades = 3, alpha = 0.4)[3])) + 
+  geom_sf(data = domcv6sf_n, alpha = 0.25, size = 0.3) +
+  theme_void() +
+  theme(panel.grid.major = element_line(colour = 'transparent')) +
+  guides(fill = FALSE)
+
+# south plot
+ps <- b118cvsf %>% mutate(n = ifelse(Subbasin_N %in% with_beta_south, T, F)) %>% 
+  ggplot() + 
+  geom_sf(aes(fill = n)) + 
+  scale_fill_manual(values = c("grey90", colormap(colormaps$viridis, nshades = 3, alpha = 0.4)[3])) + 
+  geom_sf(data = domcv6sf_s, alpha = 0.25, size = 0.3) +
+  theme_void() +
+  theme(panel.grid.major = element_line(colour = 'transparent')) +
+  guides(fill = FALSE)
+
+# visualize linear models
 north_south_model <- test %>% 
   mutate(north_south = ifelse(Subbasin_N %in% with_beta_north, "North", NA),
          north_south = ifelse(Subbasin_N %in% with_beta_south, "South", north_south)) %>% 
   filter(!is.na(north_south))
 
-p_north_south_model <- north_south_model %>% 
+# p_north_south_model <- north_south_model %>% 
+#   mutate(bot      = bot      * 0.3048,      # convert ft to meters
+#          pump_loc = pump_loc * 0.3048) %>%  # convert ft to meters
+#   ggplot(aes(log(pump_loc), log(bot))) +
+#   geom_point(alpha = 0.5) +
+#   geom_smooth(method = "lm", se = FALSE, color = "red") +
+#   facet_wrap(~north_south, ncol = 1) +
+#   theme_bw() +
+#   # labs(title = "Spatial Dependency of Pump Location",
+#   #      subtitle = "North & South Models for Imputing Pump Location",
+#   #      y = "log(pump location)", x = "log(screen bottom)")
+#   labs(x = expression(ln(z[b])), y = expression(ln(z)))
+# 
+# p_north_south_model
+# 
+# ggplot2::ggsave(p_north_south_model, 
+#                 filename = "p_north_south_model.png", 
+#                 dpi = 300, height = 7, width = 11)
+
+# separate north and south models
+p_north_model <- north_south_model %>% 
+  filter(north_south == "North") %>% 
+  mutate(bot      = bot      * 0.3048,      # convert ft to meters
+         pump_loc = pump_loc * 0.3048) %>%  # convert ft to meters
   ggplot(aes(log(pump_loc), log(bot))) +
-  geom_point() +
-  geom_smooth(method = "lm") +
-  facet_wrap(~north_south) +
-  theme_minimal() +
-  labs(title = "Spatial Dependency of Pump Location",
-       subtitle = "North & South Models for Imputing Pump Location",
-       y = "log(pump location)", x = "log(screen bottom)")
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  # facet_wrap(~north_south, ncol = 1) +
+  theme_bw() +
+  coord_cartesian(xlim = c(.5, 6), ylim = c(1.5, 6.5)) +
+  # labs(title = "Spatial Dependency of Pump Location",
+  #      subtitle = "North & South Models for Imputing Pump Location",
+  #      y = "log(pump location)", x = "log(screen bottom)")
+  labs(x = expression(ln(z[b])), y = expression(ln(z)))
 
-p_north_south_model
+p_south_model <- north_south_model %>% 
+  filter(north_south == "South") %>% 
+  mutate(bot      = bot      * 0.3048,      # convert ft to meters
+         pump_loc = pump_loc * 0.3048) %>%  # convert ft to meters
+  ggplot(aes(log(pump_loc), log(bot))) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  # facet_wrap(~north_south, ncol = 1) +
+  theme_bw() +
+  coord_cartesian(xlim = c(.5, 6), ylim = c(1.5, 6.5)) +
+  # labs(title = "Spatial Dependency of Pump Location",
+  #      subtitle = "North & South Models for Imputing Pump Location",
+  #      y = "log(pump location)", x = "log(screen bottom)")
+  labs(x = expression(ln(z[b])), y = expression(ln(z)))
 
-ggplot2::ggsave(p_north_south_model, 
-                filename = "p_north_south_model.png", 
-                dpi = 300, height = 7, width = 11)
+# cowplot combining 5 plots
+library(cowplot)
+library(beepr)
+# right side
+pright <- plot_grid(pn, p_north_model, ps, p_south_model, # maps and linear models for north and south models
+                    labels = c("(B)","(D)","(C)","(E)"))  # labels
+                    
+
+# left and ride side together
+p <- plot_grid(p, labels = "(A)")
+comb <- plot_grid(p, pright, ncol = 2, rel_widths = c(1,2))
+
+# save
+ggplot2::ggsave(comb, filename = "north_south_impute.png", dpi=300, height = 7, width = 11)
 
 # create and export linear models
 # export lm coefficients
@@ -348,17 +466,19 @@ ns_lms <- north_south_model %>%
 
 ns_lm <- data.frame(region = names(ns_lms),
                     b0 = lapply(ns_lms, function(x){return(coef(x)[1])}) %>% do.call(rbind, .),
-                    b1 = lapply(ns_lms, function(x){return(coef(x)[2])}) %>% do.call(rbind, .))
+                    b1 = lapply(ns_lms, function(x){return(coef(x)[2])}) %>% do.call(rbind, .),
+                    r2 = lapply(ns_lms, function(x){return(x$r.squared)}) %>% do.call(rbind, .),
+                    n  = lapply(ns_lms, function(x){return(x$df[2])}) %>% do.call(rbind, .))
 
 rownames(ns_lm) <- NULL
-write_rds(ns_lm, "ns_lm.rds")
+# write_rds(ns_lm, "ns_lm.rds")
 ```
 
 
 Let's now apply the lm coefficients to `bot` for locations where we don't have data, and create a new `domcv6` to export to the calibration script. This is where the script can be refined with more information.
 ```{r}
 # load up domcv6
-domcv6 <- read_rds("domcv6_mean_gw.rds")
+domcv6 <- read_rds("domcv6_mean_gw.rds") # mean of gw level stack from 2012-2016 
 domcv6@data <- left_join(domcv6@data, test %>% dplyr::select(WCRNumber, pump_loc), by = "WCRNumber")
 
 # find what subbasins each point is in

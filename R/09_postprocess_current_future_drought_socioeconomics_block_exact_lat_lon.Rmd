@@ -97,7 +97,8 @@ p1b <- l[[1]]@data %>%
   labs(title = "Distance from Well Failure to Closest Water System",
        y = "Distance (miles)", x = "Income Level") +
   scale_fill_viridis_d() +
-  guides(fill = FALSE)
+  guides(fill = FALSE) +
+  scale_y_continuous(breaks = 0:7)
 
 p1b
 
@@ -245,7 +246,45 @@ d12_16 <- cowplot::plot_grid(title, comb, ncol = 1, rel_heights = c(0.1, 1))
 
 d12_16
 
-# ggplot2::ggsave(d12_16, filename = "p_d12_16.png", dpi = 300, height = 6, width = 10)
+ggplot2::ggsave(d12_16, 
+                filename = here("code","01_presentations",
+                                "final_submission","AI","p_d12_16.png"), 
+                dpi = 300, height = 6, width = 10)
+here()
+```
+```{r}
+# study site
+library(mapdata)
+library(ggsn)
+states <- map_data("state")
+ca <- subset(states, region == "california")
+
+# need to change zoom on sat_bg to 5
+ss1 <- sat_bg + 
+    geom_polygon(data = ca, aes(long, lat, group = group), 
+                 color = "black",size = 0.8, fill = "white", alpha = 0) +
+    geom_polygon(data = cvt, 
+                 aes(long, lat, group = group), 
+                 color = "black", fill = "white", alpha = 0.5) + 
+    #coord_fixed(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+    theme_void() 
+    
+ggplot2::ggsave(ss1, filename = here("code", "00_figures", "study_site","ss1.png"), dpi = 300)
+
+# change zoom on sat_bg back to 6
+ss2 <- sat_bg + 
+    #ggplot() +
+    geom_polygon(data = cvt, 
+                 aes(long, lat, group = group), 
+                 color = "black", fill = "white", alpha = 0.3) + 
+    coord_fixed(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+    theme_void() + 
+  north(cvt, symbol = 12) #+
+  #scalebar(cvt, dist = 50, dd2km = TRUE, model = "WGS84")
+
+ss2
+
+ggplot2::ggsave(ss2, filename = here("code", "00_figures", "study_site","ss_bg.png"), dpi = 300)
 ```
 
 Future droughts
