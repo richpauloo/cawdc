@@ -1,0 +1,77 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Load up scenarios from Alvar.
+```{r}
+library(raster)
+library(tidyverse)
+library(here)
+library(readr)
+library(ggplot2)
+
+# file path to alvar's layers
+fp <- "F:/Box Sync/water_data_challenge/data/alvar/sustainable_gw_mgmt_scenarios"
+
+# list of gw level interpolations
+f <- list.files(fp) 
+r <- list()
+for(i in 1:length(f)){
+  r[[i]] <- raster(paste(fp, f[i], sep = "/"))
+}
+
+# central valley
+cv <- read_rds("cv.rds")
+
+# domestic wells
+domcv10 <- read_rds("domcv10.rds")
+domcv10 <- spTransform(domcv10, crs(cv))
+```
+
+```{r}
+s <- stack(r[[1]], r[[2]], r[[3]])
+spplot(s)
+```
+
+Plot
+```{r}
+# read in predicted dry wells at various sustainable mgmt scenarios
+# from `06_calibration_herve_alvar_graham_TS_calib.Rmd` section
+# is entitled `# Alvar's Sustainable Groundwater Management Scenarios`
+z <- read_rds("sustainable_gw_mgmt_pred.rds")
+cv_df <- read_rds("cv_df.rds")
+
+zdf <- lapply(z, function(x){as.data.frame(x)})
+col <- colormap(colormaps$viridis, nshades=6)
+nfail <- sapply(zdf, nrow) %>% format(., big.mark = ",")
+
+# plot
+library(glue)
+p1 <- ggplot() +
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  geom_point(data = zdf[[1]], aes(dom.lon, dom.lat), alpha = 0.4, size = 0.75, color = col[2]) +
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(title = "2020", subtitle = glue("Well failures (n = {nfail[1]})"))
+
+p2 <- ggplot() +
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  geom_point(data = zdf[[2]], aes(dom.lon, dom.lat), alpha = 0.4, size = 0.75, color = col[3]) +
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(title = "2040", subtitle = glue("Well failures (n = {nfail[2]})"))
+
+p3 <- ggplot() +
+  geom_path(data = cv_df, aes(long, lat, group = group)) +
+  geom_point(data = zdf[[3]], aes(dom.lon, dom.lat), alpha = 0.4, size = 0.75, color = col[4]) +
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(title = "2040 GP", subtitle = glue("Well failures (n = {nfail[3]})"))
+
+p <- cowplot::plot_grid(p1,p2,p3, nrow = 1)
+
+ggplot2::ggsave(p, filename = "alvar_sgma.pdf", device = cairo_pdf, height = 8, width =11)
+
+```
+

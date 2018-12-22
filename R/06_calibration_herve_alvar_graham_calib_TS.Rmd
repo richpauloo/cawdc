@@ -65,7 +65,7 @@ res(cvr) <- c(28968.192, 28968.192) # 18x18 miles
 cvrp <- rasterToPolygons(cvr)
 ```
 
-Only include the ploygons with sufficiently large area (remove boundary polygons with small area).
+Only include the polygons with sufficiently large area (remove boundary polygons with small area).
 ```{r}
 test <- gIntersection(cv, cvrp, byid=T)
 test_area <- gArea(test, byid = T)
@@ -965,6 +965,7 @@ domcv3@data <- domcv3@data %>%
 
 # wells dry from 2012-2016 drought
 dry_12_16 <- which(domcv3@data$dry == T)
+# write_rds(dry_12_16, "dry_12_16.rds")
 
 # export for amanda
 d_12_16 <- domcv3[domcv3@data$dry == TRUE, ]
@@ -1018,6 +1019,8 @@ blmcv2@data$wet <- blm_wet
 
 ## Future Drought Scenarios
 
+Run this script through line 205.  
+
 We recycle this code to make predictions for **future** drought predicitons.
 ```{r}
 # load future drought GWL change
@@ -1041,6 +1044,7 @@ domcv <- raster::extract(sp_fa_2017_gwl, domcv, # get initial cond @pts
                           sp = TRUE)
 
 # remove wells that are already dry, about 20% of data
+dry_12_16 <- read_rds("dry_12_16.rds")
 domcv <- domcv[-dry_12_16, ] # remove wells dry from 2012-2016 drought
 domcv@data <- domcv@data %>% 
   mutate(dry = ifelse(layer >= pump_loc, TRUE, FALSE)) # wells dry at start: SP/FA 2017
@@ -1161,6 +1165,160 @@ b118cv@data$wet <- b118_wet
 # blmcv2@data$dry <- blm_dry
 # blmcv2@data$wet <- blm_wet
 ```
+
+
+# Alvar's Sustainable Groundwater Management Scenarios
+
+Run this script through line 205.  
+
+
+```{r}
+# load scenarios 
+fp <- "F:/Box Sync/water_data_challenge/data/alvar/sustainable_gw_mgmt_scenarios"
+
+# list of gw level interpolations
+f <- list.files(fp) 
+r <- list()
+for(i in 1:length(f)){
+  r[[i]] <- raster(paste(fp, f[i], sep = "/"))
+}
+
+r <- lapply(r, projectRaster, crs = merc)
+
+s1 <- r[[1]] # 1 year drought
+s2 <- r[[2]] # 2 year drought
+s3 <- r[[3]] # 3 year drought
+
+# initial conditions = mean(spring/fall 2017)
+sp_fa_2017_gwl <- read_rds(here("code","sp_fa_2017_gwl.rds"))
+sp_fa_2017_gwl <- projectRaster(sp_fa_2017_gwl, crs = merc)
+
+# extract initial GWL conditions to points
+domcv <- domcv9
+
+domcv <- raster::extract(sp_fa_2017_gwl, domcv, # get initial cond @pts
+                          # extracted value = avgerage of 4 nearest cells
+                          method = "bilinear",
+                          # add values onto data.frame of sp object
+                          sp = TRUE)
+
+# remove wells that are already dry, about 20% of data
+dry_12_16 <- read_rds("dry_12_16.rds")
+domcv <- domcv[-dry_12_16, ] # remove wells dry from 2012-2016 drought
+domcv@data <- domcv@data %>% 
+  mutate(dry = ifelse(layer >= pump_loc, TRUE, FALSE)) # wells dry at start: SP/FA 2017
+
+domcv <- domcv[domcv@data$dry == FALSE &  # remove wells dry at start of model
+               domcv@data$year <= 2016, ] # remove wells not in study period (> 2016)
+  
+
+# add scenario GWL to spatial points (wells)
+# extract scenario water levels
+domcv <- raster::extract(s1,       # extract from 
+                         domcv,    # to domcv points
+                         sp = TRUE)# and add the values to a data frame
+
+domcv <- raster::extract(s2,       # extract from 
+                         domcv,    # to domcv points
+                         sp = TRUE)# and add the values to a data frame
+
+domcv <- raster::extract(s3,       # extract from 
+                         domcv,    # to domcv points
+                         sp = TRUE)# and add the values to a data frame
+
+
+# remove the ~1000 wells that fall outside of the raster cells
+domcv <- domcv[!is.na(domcv@data$r2020) & 
+               !is.na(domcv@data$r2040) &
+               !is.na(domcv@data$r2040gp), ] 
+  
+# copy of the data without missing values 
+domcv2 <- domcv[!is.na(domcv@data$year) , ] 
+  
+# ry <- 2016 - a            
+ry <- cutoff
+  
+# subset for active wells
+domcv3 <- domcv2[which(domcv2@data$year >= ry), ] 
+  
+# put into dataframe and compute well failures
+domcv3@data <- domcv3@data %>% 
+  mutate(dry_s1 = ifelse(r2020 >= pump_loc, TRUE, FALSE), # wells dry in s1 
+         dry_s2 = ifelse(r2040 >= pump_loc, TRUE, FALSE), # wells dry in s2 
+         dry_s3 = ifelse(r2040gp >= pump_loc, TRUE, FALSE)) # wells dry in s3 
+        
+
+# sanity check
+list(domcv3@data$dry_s1, domcv3@data$dry_s2, 
+     domcv3@data$dry_s3) %>% 
+  lapply(., table)
+
+# list of results
+z <- list(domcv3[domcv3@data$dry_s1==T,],
+     domcv3[domcv3@data$dry_s2==T,],
+     domcv3[domcv3@data$dry_s3==T,])
+
+# write files
+# write_rds(z, "sustainable_gw_mgmt_pred.rds")
+
+# # map
+# plot(cv)
+# points(z[[1]], col="red", pch = 19, cex = 0.001)
+# 
+# # export for amanda
+# # need to drop geometry columns from sf
+# z[[1]]@data <- z[[1]]@data %>% dplyr::select(WCRNumber, CountyName, Basin_Subb)
+# z[[2]]@data <- z[[2]]@data %>% dplyr::select(WCRNumber, CountyName, Basin_Subb)
+# z[[3]]@data <- z[[3]]@data %>% dplyr::select(WCRNumber, CountyName, Basin_Subb)
+
+# z <- lapply(z, spTransform, ll)
+# export
+# shapefile(z[[1]], filename = "s1_2020.shp")
+# shapefile(z[[2]], filename = "s2_2040.shp")
+# shapefile(z[[3]], filename = "s3_2040_gp.shp")
+# shapefile(z[[4]], filename = "d4.shp")
+
+# now predict well failure at the relevant scales
+
+## GSAs
+# gsa_dry <- poly.counts(domcv3[domcv3$dry == T, ], gsacv)
+# gsa_wet <- poly.counts(domcv3[domcv3$dry == F, ], gsacv)
+# gsa_frp <- gsa_dry / (gsa_dry + gsa_wet)
+# 
+# gsacv@data$frp <- gsa_frp * 100
+# gsacv@data$fc <- paste0("(",gsa_dry,"/",(gsa_dry+gsa_wet)," = ",round(gsa_frp*100,2),"%)")
+# gsacv@data$dry <- gsa_dry
+# gsacv@data$wet <- gsa_wet
+
+# B118 
+b118_dry_s1 <- poly.counts(domcv3[domcv3$dry_s1 == T, ], b118cv)
+b118_wet_s1 <- poly.counts(domcv3[domcv3$dry_s1 == F, ], b118cv)
+b118_frp <- b118_dry / (b118_dry + b118_wet)
+
+b118cv@data$frp <- b118_frp * 100
+b118cv@data$fc <- paste0("(",b118_dry,"/",(b118_dry+b118_wet)," = ",round(b118_frp*100,2),"%)")
+b118cv@data$dry <- b118_dry
+b118cv@data$wet <- b118_wet
+
+## Township: need to create a SPDF!
+# blm_dry <- poly.counts(domcv3[domcv3$dry == T, ], blmcv)
+# blm_wet <- poly.counts(domcv3[domcv3$dry == F, ], blmcv)
+# blm_frp <- blm_dry / (blm_dry + blm_wet)
+# 
+# # Extract polygon ID's
+# pid <- sapply(slot(blmcv, "polygons"), function(x) slot(x, "ID"))
+# # Create dataframe with correct rownames and make SPDF
+# pdf <- data.frame( ID=1:length(blmcv), row.names = pid)
+# blmcv2 <- SpatialPolygonsDataFrame(blmcv, pdf)
+# 
+# # bind info
+# blmcv2@data$frp <- blm_frp * 100
+# blmcv2@data$fc <- paste0("(",blm_dry,"/",(blm_dry+blm_wet)," = ",round(blm_frp*100,2),"%)")
+# blmcv2@data$dry <- blm_dry
+# blmcv2@data$wet <- blm_wet
+```
+
+
 
 
 # Results

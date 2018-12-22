@@ -70,7 +70,7 @@ $\Delta H$ is the change in groundwater level over the 2012-2016 drought
 $H_f$ is the mean groundwater level of Spring and Fall 2016  
 $H_i$ is the mean groundwater level of Spring 2011 and Spring 2012  
 
-We also remove 5% of the outliers fromt he high and low ends of the distribution, which incidentally coincide with areas of low to zero domestic well occurence.  
+We also remove 5% of the outliers fromt the high and low ends of the distribution, which incidentally coincide with areas of low to zero domestic well occurence.  
 ```{r}
 diff <- (df - di)
 # diff <- (d - pd)
@@ -149,7 +149,7 @@ spplot(drought_scenarios)
 write_rds(drought_scenarios, "drought_scenarios.rds")
 ```
 
-Initial conditions kfor future drougths moving forward == mean(spring and fall 2017 GWL)
+Initial conditions for future drougths moving forward == mean(spring and fall 2017 GWL)
 ```{r}
 # mean of spring and fall 2017 Groundwater level is t0 for future droughts
 sp_fa_2017_gwl <- mean(e[[11]], e[[12]]) 

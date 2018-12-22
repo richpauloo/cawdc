@@ -66,6 +66,14 @@ d1 <- shapefile(here("data", "amanda_shp", "well_failures", "d1.shp")) # 1 yr
 d2 <- shapefile(here("data", "amanda_shp", "well_failures", "d2.shp")) # 2 yr
 d3 <- shapefile(here("data", "amanda_shp", "well_failures", "d3.shp")) # 3 yr
 d4 <- shapefile(here("data", "amanda_shp", "well_failures", "d4.shp")) # 4 yr
+
+# alvars SGMA scenarios
+z <- read_rds("sustainable_gw_mgmt_pred.rds")
+z <- lapply(z, spTransform, ll)
+
+s1 <- z[[1]]
+s2 <- z[[2]]
+s3 <- z[[3]]
 ```
 
 
@@ -132,7 +140,7 @@ for(i in 2:5){
 
 dtb <- do.call(rbind.data.frame, dt) # bind into one df
 
-pred_1_2_3_4 <- sat_bg + 
+pred_1_2_3_4 <- ggplot() + # sat_bg +
     geom_polygon(data = cvt, aes(long, lat, group = group), color = "black", fill = "white", alpha = 0.3) +
     geom_point(data = dtb, aes(coords.x1, coords.x2), alpha = 0.4, size = 0.5, color = "red") +
     facet_wrap(~ drought, nrow = 1, strip.position="bottom") +
@@ -141,7 +149,7 @@ pred_1_2_3_4 <- sat_bg +
     labs(title = "The Impact of Future Drought on Domestic Well Failure",
          subtitle = "1, 2, 3 and 4 year droughts (starting January 2018)") 
   
-# ggplot2::ggsave(pred_1_2_3_4, filename = "pred_1_2_3_4.png", 
+# ggplot2::ggsave(pred_1_2_3_4, filename = "pred_1_2_3_4.png",
 #                 dpi = 300, height = 6, width = 16)
 # readr::write_rds(pred_1_2_3_4, "pred_1_2_3_4.rds")
 ```
@@ -185,18 +193,71 @@ b118cv_long$lab <- cut(x = b118cv_long$density, breaks = seq(0,14,1),
                                   "7-8","8-9","9-10","10-11","11-12","12-13","13-14"))
 b118cv_long$lab[is.na(b118cv_long$lab)] <- "0-1"
 
-p_temp <- sat_bg +
+p_temp <- ggplot() + #sat_bg +
   geom_sf(data = b118cv_long, aes(fill = lab), inherit.aes = FALSE) +
   scale_fill_viridis_d() +
-  theme_bw() + 
-  facet_wrap(~drought, nrow = 1, strip.position="bottom") +
-  coord_sf(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
-  theme_void() + theme(legend.position = "bottom") +
-  guides(fill=guide_legend(nrow=1,byrow=TRUE))
+  # theme_bw() + 
+  facet_wrap(~drought, nrow = 1, strip.position="top") +
+  # coord_sf(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+  coord_sf(datum=NA) +
+  theme(legend.position = "bottom") +
+  guides(fill=guide_legend(nrow=1,byrow=TRUE)) +
+  labs(fill = "Density (n/100 sq km)")
 
 ggplot2::ggsave(p_temp, filename= "density_pred_1_2_3_4.png", 
                 dpi = 300, height = 6, width = 16)
 getwd()
+```
+
+
+PLot Alvar's SGMA scenarios in terms of density.
+```{r}
+# bulletin 118 shapefile in central valley
+b118cv <- read_rds("b118cv.rds")
+b118cv <- spTransform(b118cv, ll)
+# calculate number of dry wells per areal unit for each drought
+b118cv@data$dry_s1 <- poly.counts(s1, b118cv)
+b118cv@data$dry_s2 <- poly.counts(s2, b118cv)
+b118cv@data$dry_s3 <- poly.counts(s3, b118cv)
+
+# convert to sf
+b118cvsf <- st_as_sf(b118cv)
+b118cvsf$area <- st_area(b118cvsf)
+
+# calculate density
+b118cvsf <- b118cvsf %>% 
+  mutate(area = as.numeric(area),
+         # convert m2-> km2 -> 100 km
+         s1_2020 = (dry_s1/area)*1000000 * sqrt(100)*2,
+         s2_2040 = (dry_s2/area)*1000000 * sqrt(100)*2,
+         s3_2040gp = (dry_s3/area)*1000000 * sqrt(100)*2)
+
+# tidy
+b118cv_long <- gather(b118cvsf, "drought", "density", 
+                      c(s1_2020, s2_2040, s3_2040gp))
+
+max(b118cv_long$density)
+
+# b118cv_long$lab <- cut(x = b118cv_long$density, breaks = seq(0,32,2),
+#                        labels = c("0-2","2-4","4-6","6-8","8-10","10-12","12-14",
+#                                   "14-16","16-18","18-20","20-22","22-24","24-26","26-28", "28-30", "30-32"))
+b118cv_long$lab <- cut(x = b118cv_long$density, breaks = seq(0,26,2),
+                       labels = c("0-2","2-4","4-6","6-8","8-10","10-12","12-14",
+                                  "14-16","16-18","18-20","20-22","22-24","24-26"))
+b118cv_long$lab[is.na(b118cv_long$lab)] <- "0-2"
+
+p_temp <- ggplot() + #sat_bg +
+  geom_sf(data = b118cv_long, aes(fill = lab), inherit.aes = FALSE) +
+  scale_fill_viridis_d() +
+  # theme_bw() + 
+  facet_wrap(~drought, nrow = 1, strip.position="top") +
+  # coord_sf(1.1, xlim = c(-118, -123.5), ylim = c(34.5, 41)) +
+  coord_sf(datum=NA) +
+  theme(legend.position = "bottom") +
+  guides(fill=guide_legend(nrow=1,byrow=TRUE)) +
+  labs(fill = "Density (n/100 sq km)")
+
+ggplot2::ggsave(p_temp, filename = "alvar_sgma_2.pdf", device = cairo_pdf, height = 8, width =11)
 ```
 
 

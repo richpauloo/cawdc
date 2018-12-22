@@ -320,6 +320,7 @@ pdwr_df <- as.data.frame(pdwr, xy = TRUE)
 cv@data$id = rownames(cv@data)
 cv_pts = fortify(cv, region="id")
 cv_df = left_join(cv_pts, cv@data, by="id")
+# write_rds(cv_df, "cv_df.rds")
 
 # palettes, labels
 lab  <- c("0.00 to 0.20","0.20 to 0.40","0.40 to 0.60","0.60 to 0.80", "0.80 to 1.00")
